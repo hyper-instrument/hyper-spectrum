@@ -17,7 +17,7 @@
 - Select the outer backend through ACE settings. For Bohr use `ACEBENCH_LB_RESEARCH_BACKEND=bohr-job` together with `ACEBENCH_LB_RESEARCH_BOHR_PROJECT_ID` and `ACEBENCH_LB_RESEARCH_BOHR_MACHINE_TYPE`; `research run` has no `--backend` option.
 - Keep the HyperSpectrum `RunPlan` backend local inside the container. It must not duplicate ACE `ExecutionSpec`, backend selection, staging, metrics ingestion, or report generation.
 - In M1, register each classical algorithm as an independent ACE `ResearchModel` with its own model directory and thin adapter. Do not select algorithms through a sibling runtime manifest; a shared parameterized adapter requires a separate ACE framework contract change first.
-- Release images fail closed. With the frozen e62 CLI, never combine `research build --verify` with `--push`: that implementation pushes before it refuses a failed probe. Build and verify without push, push the exact repository/tag only after verification passes, then pull/re-resolve the registry digest and pullability before recording it.
+- Release images fail closed. On a never-pushed e62 image, `_digest()` falls back to Docker `.Id`, and `ImageRef.reference` mis-renders it as `repo@sha256:<local-config-id>`; therefore `research build --verify` is not a reliable fresh-image probe and its pre-push `reference`/`digest` are unsafe. Build with `--no-verify` and no push, compose the exact local `<repository>:<tag>` from those separate JSON fields, run the declared probe against that tag with `verify_image()` (or its exact Docker-run mechanism), then push that same tag and clean-pull/re-resolve the registry digest and pullability. Never use combined `--verify --push`.
 - Bohr has no bind mounts. Stage data, weights, and adapter through the existing backend and record the resolved image digest.
 - Never use random initialization when weights are absent or invalid. Set the ACE `ResearchModel.status` to `pending_weights` and preserve the exact blocker in evidence and milestone gates; ACE variants and assets have no `blocked` status field.
 - Never copy or publicly redistribute `Even-Ma/xas` or XASDenoise until licensing allows it. A private validation image may reference a pinned external checkout.
@@ -124,17 +124,18 @@ Raw datasets, weights, logs, signed URLs, and full reports remain in configured 
 5. Implement each `run.py` as translation only: ACE arguments → model-fixed local HyperSpectrum `RunPlan`/executor → ACE metrics envelope. Do not reimplement axis validation, XAS baselines, or metric formulas, and do not duplicate ACE execution/staging/report logic.
 6. Fix tool selection by the ACE model directory and adapter code. Do not depend on a sibling `tool-manifest.json`, because the frozen ACE adapter stages and hashes only `common/entry.py` plus the model-specific `run.py`. Fixed-weight execution must call `resolve_weights`; classical adapters must reject a non-empty weights path to prevent accidental model confusion. If one adapter must receive a variant identity at runtime, stop and propose a separate ACE framework change.
 7. Assert any incomplete `PredictionBundle`, failed sample, or missing prediction exits non-zero without publishing `metrics.json`.
-8. Build and probe every classical model through ACE so `verify.py` runs inside the built dependency environment, not through bare host Python. Do not pass `--push` in this step:
+8. Build every classical model to the intended repository/tag without verification or push:
 
    ```bash
    uv run acebench-lb research build <model-id> \
-     --registry <registry> --verify --json
+     --registry <registry> --no-verify --json
    ```
 
-   Assert exit 0, `verified: true`, and `verifyDeclared: true`. Inspect the built image through the configured Docker host and assert its entrypoint is `python /opt/acebench/run.py`. Treat the build response's `digest` as a local pre-push identity, not a registry digest.
-9. Only after step 8 passes, push the exact returned `<repository>:<tag>` with the configured Docker host. Pull that tag from the registry (preferably on a clean daemon with the same access path Bohr will use), resolve its `RepoDigest`, and record the resulting `<repository>@sha256:...` plus pullability evidence. A failed probe, push, pull, missing `RepoDigest`, or changed digest is a hard gate; do not seed/use the image. If this cannot be automated safely with the frozen CLI, open an ACE prerequisite instead of using combined `--verify --push`.
+   Assert exit 0 and `verified: null`. Read only the separate `repository` and `tag` fields and compose `<repository>:<tag>`; do not use the returned pre-push `reference` or `digest`, because e62 may have formatted the local Docker `.Id` as `repo@sha256:<local-config-id>`. Inspect that exact local tag through the configured Docker host and assert its entrypoint is `python /opt/acebench/run.py`.
+9. Invoke `ace_leaderboard.research.verify.verify_image(model_id, "<repository>:<tag>", repo_root=..., docker=...)` against the exact local tag. This supported helper streams `harness/docker/research/<model-id>/verify.py` on stdin into `docker run --rm --interactive --entrypoint sh <repository>:<tag> -c <python-resolver>`; assert `declared: true`, `ok: true`, and the pinned dependency/commit checks. Do not substitute `research build --verify` or bare-host Python. If the workflow cannot invoke this tag-based probe safely, stop and open an ACE prerequisite.
+10. Only after step 9 passes, push the same `<repository>:<tag>` with the configured Docker host. Pull that tag on a clean daemon with the same registry path Bohr will use, inspect `RepoDigests`, and record the resulting `<repository>@sha256:...` plus pullability evidence. A failed probe, push, pull, missing `RepoDigest`, or changed digest is a hard gate; do not seed/use the image.
 
-10. Commit: `feat: add thin XAS denoising research adapters`.
+11. Commit: `feat: add thin XAS denoising research adapters`.
 
 ## Task 4: Verify the Fixed Weights and Build the Private Model Image
 

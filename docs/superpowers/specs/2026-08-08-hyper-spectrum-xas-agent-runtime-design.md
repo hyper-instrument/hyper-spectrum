@@ -322,18 +322,22 @@ ACE `ExecutionSpec` 持有 model/variant/dataset、镜像、参数、环境变�
 
 每个 classical model 目录还必须提供自己的 `Dockerfile`，把 `run.py` 复制到
 `/opt/acebench/run.py`、安装固定版本的 HyperSpectrum/依赖，并把该路径设为镜像
-`ENTRYPOINT`。`acebench-lb research build <model-id> --verify` 会把同目录 `verify.py`
-通过 stdin 放进构建后的镜像执行；禁止用裸宿主机 `python verify.py` 代替镜像验证。
+`ENTRYPOINT`。声明的 `verify.py` 必须通过 `ace_leaderboard.research.verify.verify_image()`
+对精确 local repository/tag 运行；该 helper 通过 stdin 把 probe 放进
+`docker run --rm --interactive --entrypoint sh <repository>:<tag>` 执行。禁止用裸宿主机
+`python verify.py` 代替镜像验证。
 外部构建镜像只能通过经过同样 in-image probe 的显式 `--image <pullable-registry-tag>`
 覆盖进入运行。
 
-e62 的 `research build --verify --push` 不是 fail-closed：它在最终拒绝失败 probe 之前
-已经执行 push。因此镜像发布必须分段：先带目标 registry 名构建并 `--verify --json`
-但不 push；确认 exit 0、`verified: true`、`verifyDeclared: true` 后，才单独 push 返回的
-精确 repository/tag；随后从 registry 重新 pull/resolve `RepoDigest` 和 Bohr pullability。
-build JSON 的 pre-push `digest` 只视为本地 identity，不作为 registry digest。任何阶段
-失败都停止；若冻结 CLI 无法安全自动化该流程，先建立 ACE prerequisite，不能退回组合
-`--verify --push`。
+e62 的 fresh-image digest 还有一层陷阱：未 push 的镜像没有 `RepoDigests` 时，`_digest()`
+回退 Docker `.Id`，`ImageRef.reference` 随后误渲染为
+`repo@sha256:<local-config-id>`。所以 `research build --verify` 也不能作为 fresh-image
+可靠 probe，组合 `--verify --push` 更不允许。发布必须分段：先带目标 registry 名用
+`--no-verify --json` 构建且不 push；忽略 pre-push `reference`/`digest`，只用返回的独立
+`repository` 和 `tag` 组成精确 local tag；对该 tag 调用 `verify_image()` 并断言 declared/
+ok；通过后才 push 同一 tag；最后在 clean daemon 重新 pull、inspect `RepoDigests` 并验证
+Bohr pullability。任何阶段失败都停止；若工作流不能调用这个受支持的 tag probe，先建立
+ACE prerequisite。
 
 本地路径适合数据已经在 5090 或用户本地 GPU 的场景。Bohr 通过
 `ACEBENCH_LB_RESEARCH_BACKEND=bohr-job`、`ACEBENCH_LB_RESEARCH_BOHR_PROJECT_ID` 和
