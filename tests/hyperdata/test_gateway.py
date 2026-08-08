@@ -191,6 +191,51 @@ def test_unresolved_bare_hd_fails_closed_without_running_a_candidate() -> None:
     assert runner.calls == []
 
 
+def test_explicit_system_hd_case_alias_is_never_treated_as_hyperdata() -> None:
+    """Catches a case-insensitive alias of the system utility bypassing the block."""
+    runner = RecordingRunner(completed(stdout='{"records": []}\n'))
+
+    with pytest.raises(HydUnsupportedClientError) as error:
+        HydGateway(
+            binary="/usr/bin/HD",
+            runner=runner,
+            executable_resolver=lambda _candidate: None,
+        )
+
+    assert error.value.code == "unsupported_client"
+    assert runner.calls == []
+
+
+def test_bare_system_hd_case_alias_resolved_through_path_is_rejected() -> None:
+    """Catches PATH resolving HD to a case alias of the platform hd utility."""
+    runner = RecordingRunner(completed(stdout='{"records": []}\n'))
+
+    with pytest.raises(HydUnsupportedClientError) as error:
+        HydGateway(
+            binary="HD",
+            runner=runner,
+            executable_resolver=lambda _candidate: "/usr/bin/HD",
+        )
+
+    assert error.value.code == "unsupported_client"
+    assert runner.calls == []
+
+
+def test_unresolved_bare_system_hd_case_alias_fails_closed() -> None:
+    """Catches case aliases reopening the unresolved bare hd PATH bypass."""
+    runner = RecordingRunner(completed(stdout='{"records": []}\n'))
+
+    with pytest.raises(HydUnsupportedClientError) as error:
+        HydGateway(
+            binary="HD",
+            runner=runner,
+            executable_resolver=lambda _candidate: None,
+        )
+
+    assert error.value.code == "unsupported_client"
+    assert runner.calls == []
+
+
 def test_explicit_system_hd_alias_is_rejected_even_if_a_resolver_cannot_find_it() -> None:
     """Catches letting a custom resolver bypass canonical explicit-path checks."""
     runner = RecordingRunner(completed(stdout='{"records": []}\n'))

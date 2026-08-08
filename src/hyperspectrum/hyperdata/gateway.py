@@ -14,7 +14,7 @@ from .models import HydCommandResult
 
 _AUTH_MARKERS = ("not authenticated", "unauthenticated", "authentication required")
 _UNSUPPORTED_MARKERS = ("unknown command", "unrecognized command", "unsupported command")
-_SYSTEM_HD_BINARY = os.path.normcase(os.path.realpath("/usr/bin/hd"))
+_SYSTEM_HD_BINARY = os.path.realpath("/usr/bin/hd").casefold()
 _BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 _NAMED_SECRET_PATTERN = re.compile(
     r"(?i)\b(?:access[_ -]?token|token|api[_ -]?key|secret|password)\b"
@@ -56,7 +56,7 @@ def _is_system_hd(resolved_binary: str | None) -> bool:
     """Identify only the platform hd utility after canonical path resolution."""
     if resolved_binary is None:
         return False
-    return os.path.normcase(os.path.realpath(resolved_binary)) == _SYSTEM_HD_BINARY
+    return os.path.realpath(resolved_binary).casefold() == _SYSTEM_HD_BINARY
 
 
 def _is_explicit_system_hd(binary: str) -> bool:
@@ -139,7 +139,7 @@ class HydGateway:
         if (
             _is_explicit_system_hd(binary)
             or _is_system_hd(resolved_binary)
-            or (binary == "hd" and resolved_binary is None)
+            or (binary.casefold() == "hd" and resolved_binary is None)
         ):
             raise HydUnsupportedClientError("/usr/bin/hd is not the HyperData CLI")
 
