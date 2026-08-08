@@ -49,7 +49,9 @@ warnings, and blockers as evidence.
 Repeat `--sample-id` to bind every predeclared sample ID during planning, in the
 exact deterministic execution order. Use the identical ordered IDs for dry-run,
 the executable plan, and `run local`; changing a member or its order requires a
-new plan and plan digest.
+new `hyperspectrum-run-plan/v2` and plan digest. Never execute or migrate a v1
+plan: it cannot prove a bound sample selection. Re-plan with repeated
+`--sample-id` options instead.
 
 Ground truth is readiness and later ACE-evaluation evidence only. Never read clean
 arrays to choose parameters, samples, preprocessing, or outputs. Keep the declared

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any, Literal
 
@@ -17,14 +18,22 @@ _REQUIRED_DIGESTS = (
     "data_digest",
     "environment_digest",
 )
+_V2_SHA256_DIGESTS = (
+    "model_digest",
+    "tool_digest",
+    "implementation_digest",
+    "data_digest",
+    "environment_digest",
+    "plan_digest",
+)
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
-class PredictionBundle(BaseModel):
-    """Immutable output manifest with mandatory execution provenance."""
+class _PredictionBundleBase(BaseModel):
+    """Shared immutable prediction fields without a wire-version assertion."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
-    schema_version: Literal["hyperspectrum-prediction/v1"]
     run_id: str
     task_id: str
     predictions: tuple[ArtifactRef, ...]
@@ -80,3 +89,40 @@ class PredictionBundle(BaseModel):
         if update is not None:
             data.update(update)
         return type(self).model_validate(data)
+
+
+class PredictionBundle(_PredictionBundleBase):
+    """Backward-compatible v1 output manifest."""
+
+    schema_version: Literal["hyperspectrum-prediction/v1"]
+
+
+class PredictionBundleV2(_PredictionBundleBase):
+    """Selection-bound prediction contract for M0 success handoffs."""
+
+    schema_version: Literal["hyperspectrum-prediction/v2"]
+
+    @field_validator("provenance")
+    @classmethod
+    def require_v2_provenance(cls, value: FrozenJsonMapping) -> FrozenJsonMapping:
+        for key in _V2_SHA256_DIGESTS:
+            digest = value.get(key)
+            if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
+                raise ValueError(f"provenance {key} must be a lowercase SHA-256")
+        weight_digest = value.get("weight_digest")
+        if weight_digest != "none" and (
+            not isinstance(weight_digest, str)
+            or _SHA256.fullmatch(weight_digest) is None
+        ):
+            raise ValueError(
+                "provenance weight_digest must be 'none' or a lowercase SHA-256"
+            )
+        if value.get("plan_schema_version") != "hyperspectrum-run-plan/v2":
+            raise ValueError(
+                "provenance plan_schema_version must identify a selection-bound v2 plan"
+            )
+        for key in ("dataset_code", "dataset_version"):
+            identity = value.get(key)
+            if not isinstance(identity, str) or not identity.strip():
+                raise ValueError(f"provenance {key} must be non-blank")
+        return value

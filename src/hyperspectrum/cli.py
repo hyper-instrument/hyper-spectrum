@@ -21,10 +21,12 @@ data_app = typer.Typer(no_args_is_help=True, help="Discover spectroscopy data.")
 task_app = typer.Typer(no_args_is_help=True, help="Recommend evidence-backed tasks.")
 tools_app = typer.Typer(no_args_is_help=True, help="Match registered tools.")
 run_app = typer.Typer(no_args_is_help=True, help="Plan and execute admitted runs.")
+evidence_app = typer.Typer(no_args_is_help=True, help="Validate redacted evidence.")
 app.add_typer(data_app, name="data")
 app.add_typer(task_app, name="task")
 app.add_typer(tools_app, name="tools")
 app.add_typer(run_app, name="run")
+app.add_typer(evidence_app, name="evidence")
 
 
 @app.command()
@@ -73,6 +75,18 @@ def tools_match(
     """Match compatible and locally available registered tools."""
 
     _invoke(json_output, services.match_tools, task)
+
+
+@evidence_app.command("validate")
+def evidence_validate(
+    evidence_file: Annotated[Path, typer.Option("--evidence-file")],
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit one JSON envelope.")
+    ] = False,
+) -> None:
+    """Validate successful XAS M0 evidence before egress."""
+
+    _invoke(json_output, services.validate_evidence, evidence_file)
 
 
 @run_app.command("plan")

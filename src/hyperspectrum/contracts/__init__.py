@@ -2,7 +2,7 @@
 
 from .artifact import ArtifactRef, AxisSpec
 from .observation import ObservationBundle
-from .prediction import PredictionBundle
+from .prediction import PredictionBundle, PredictionBundleV2
 from .task import MetricSpec, TaskSpec
 
 __all__ = [
@@ -11,5 +11,6 @@ __all__ = [
     "MetricSpec",
     "ObservationBundle",
     "PredictionBundle",
+    "PredictionBundleV2",
     "TaskSpec",
 ]

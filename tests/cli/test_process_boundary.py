@@ -281,3 +281,49 @@ def test_text_redactor_does_not_raise_on_deeply_malformed_diagnostic() -> None:
 
     assert "DEEP_LITERAL" not in rendered
     assert "keep-deep" in rendered
+
+
+def test_process_boundary_preserves_public_url_without_credentials() -> None:
+    public_url = "https://catalog.example.org/public/xas-dataset"
+
+    assert redact_text(public_url) == public_url
+    assert agent.ServiceResponse(result={"catalog_url": public_url}).result == {
+        "catalog_url": public_url
+    }
+
+
+def test_process_boundary_redacts_single_label_private_url_host() -> None:
+    private_url = "http://compute-node:8080/private/input"
+
+    rendered = redact_text(private_url)
+
+    assert "compute-node" not in rendered
+    assert "http://" in rendered
+
+
+def test_real_cli_refuses_legacy_v1_plan_with_migration_message(
+    tmp_path: Path,
+) -> None:
+    plan = tmp_path / "legacy-plan.json"
+    plan.write_text(
+        json.dumps({"schema_version": "hyperspectrum-run-plan/v1"}),
+        encoding="utf-8",
+    )
+
+    completed = run_module(
+        "run",
+        "local",
+        "--plan-file",
+        str(plan),
+        "--source-npz",
+        str(tmp_path / "unused.npz"),
+        "--sample-id",
+        "sample-1",
+        "--json",
+    )
+
+    assert completed.returncode == 2
+    envelope = json.loads(completed.stdout)
+    assert envelope["error"]["code"] == "invalid_or_not_ready"
+    assert "v1 lacks a bound sample selection" in completed.stderr
+    assert "Traceback" not in completed.stderr

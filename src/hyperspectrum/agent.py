@@ -14,6 +14,7 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from hyperspectrum.contracts import TaskSpec
+from hyperspectrum.evidence import XasM0EvidenceError, validate_xas_m0_evidence
 from hyperspectrum.execution import RunPlan, build_run_plan, execute_local_run
 from hyperspectrum.hyperdata import (
     HydAuthenticationError,
@@ -75,6 +76,16 @@ class AgentRequestError(AgentServiceError):
 
     error_code = "invalid_or_not_ready"
     exit_code = 2
+
+
+class AgentEvidenceError(AgentServiceError):
+    """A proposed success-evidence document is unsafe or inconsistent."""
+
+    error_code = "invalid_xas_m0_evidence"
+    exit_code = 2
+
+    def __init__(self, message: str, *, reason_code: str) -> None:
+        super().__init__(message, result={"reason_code": reason_code})
 
 
 class AgentAuthError(AgentServiceError):
@@ -198,6 +209,30 @@ def match_tools(task: str) -> ServiceResponse:
     )
 
 
+def validate_evidence(evidence_file: Path) -> ServiceResponse:
+    """Validate one proposed successful XAS M0 evidence document for egress."""
+
+    if not evidence_file.is_file():
+        raise AgentMissingAssetError(f"evidence file does not exist: {evidence_file}")
+    try:
+        raw = json.loads(evidence_file.read_text(encoding="utf-8"))
+        validated = validate_xas_m0_evidence(raw)
+    except json.JSONDecodeError as error:
+        raise AgentEvidenceError(
+            "XAS M0 evidence is not valid JSON", reason_code="schema_invalid"
+        ) from error
+    except XasM0EvidenceError as error:
+        raise AgentEvidenceError(str(error), reason_code=error.code) from error
+    except OSError as error:
+        raise AgentMissingAssetError(f"cannot read evidence file: {error}") from error
+    return ServiceResponse(
+        result={
+            "schema_version": validated["schema_version"],
+            "status": "valid",
+        }
+    )
+
+
 def plan_run(
     *,
     task_file: Path,
@@ -248,7 +283,7 @@ def run_local(
 ) -> ServiceResponse:
     """Execute an admitted plan through the public atomic local executor."""
 
-    plan = _read_model(plan_file, RunPlan, "plan file")
+    plan = _read_run_plan(plan_file)
     tool = _load_tool(plan.tool_id)
     if not source_npz.is_file():
         raise AgentMissingAssetError(f"source NPZ does not exist: {source_npz}")
@@ -288,6 +323,40 @@ def _read_model(path: Path, model: type[BaseModel], label: str) -> Any:
         raise AgentRequestError(f"{label} violates its contract: {error}") from error
     except OSError as error:
         raise AgentMissingAssetError(f"cannot read {label}: {error}") from error
+
+
+def _read_run_plan(path: Path) -> RunPlan:
+    """Read v2 plans and refuse unbound v1 files with actionable migration text."""
+
+    if not path.is_file():
+        raise AgentMissingAssetError(f"plan file does not exist: {path}")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise AgentRequestError(f"plan file is not valid JSON: {error.msg}") from error
+    except OSError as error:
+        raise AgentMissingAssetError(f"cannot read plan file: {error}") from error
+    if isinstance(raw, dict) and raw.get("schema_version") == (
+        "hyperspectrum-run-plan/v1"
+    ):
+        raise AgentRequestError(
+            "hyperspectrum-run-plan/v1 lacks a bound sample selection; "
+            "create a new v2 plan with repeated --sample-id options"
+        )
+    try:
+        return RunPlan.model_validate(raw)
+    except ValidationError as error:
+        details = error.errors(include_input=False, include_url=False)
+        serialized_details = json.dumps(
+            redact_value(details),
+            sort_keys=True,
+            default=lambda value: redact_text(str(value)),
+        )
+        raise AgentRequestError(
+            f"plan file violates its v2 contract: {serialized_details}"
+        ) from error
+    except (TypeError, ValueError) as error:
+        raise AgentRequestError(f"plan file violates its v2 contract: {error}") from error
 
 
 def _load_tool(tool_id: str) -> ToolManifest:

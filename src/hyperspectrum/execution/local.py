@@ -21,7 +21,7 @@ from uuid import uuid4
 
 import numpy as np
 
-from hyperspectrum.contracts import ArtifactRef, AxisSpec, PredictionBundle
+from hyperspectrum.contracts import ArtifactRef, AxisSpec, PredictionBundleV2
 from hyperspectrum.registry.models import ToolManifest
 
 from .plan import (
@@ -60,7 +60,7 @@ def execute_local_run(
     tool: ToolManifest,
     selected_sample_ids: Sequence[str],
     source_npz: Path,
-) -> PredictionBundle:
+) -> PredictionBundleV2:
     """Execute one complete local SavGol input set and publish it atomically."""
 
     if plan.dry_run:
@@ -395,7 +395,7 @@ def _write_run(
     selected: tuple[str, ...],
     results: Sequence[object],
     resolved_tool: _ResolvedSavGol,
-) -> PredictionBundle:
+) -> PredictionBundleV2:
     arrays_directory = directory / "arrays"
     arrays_directory.mkdir()
     predictions: list[ArtifactRef] = []
@@ -419,9 +419,9 @@ def _write_run(
     _fsync_directory(arrays_directory)
 
     run_id = f"run-{plan.plan_digest}"
-    bundle = PredictionBundle.model_validate(
+    bundle = PredictionBundleV2.model_validate(
         {
-            "schema_version": "hyperspectrum-prediction/v1",
+            "schema_version": "hyperspectrum-prediction/v2",
             "run_id": run_id,
             "task_id": plan.task.id,
             "predictions": predictions,
@@ -434,6 +434,7 @@ def _write_run(
                 "environment_digest": plan.environment_digest,
                 "weight_digest": plan.weight_digest,
                 "plan_digest": plan.plan_digest,
+                "plan_schema_version": plan.schema_version,
                 "dataset_code": plan.dataset_code,
                 "dataset_version": plan.dataset_version,
                 "backend": plan.backend,

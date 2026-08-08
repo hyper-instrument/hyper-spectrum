@@ -20,7 +20,7 @@ DATA_ENVELOPE_FIXTURE_PATH = (
 
 
 class FixtureGateway:
-    """A search-only gateway double that preserves HydGateway's result boundary."""
+    """Internal exact records-fixture compatibility, not a real hyd wire shape."""
 
     def __init__(self, records_by_query: Mapping[str, list[dict[str, object]]]) -> None:
         self.records_by_query = records_by_query
@@ -53,7 +53,17 @@ class EnvelopeGateway:
             stderr="",
             payload=self.payloads_by_query.get(
                 query,
-                {"mode": "dataset", "query": query, "data": [], "pagination": {}},
+                {
+                    "mode": "ilike",
+                    "query": query,
+                    "data": {"items": [], "total": 0, "page": 1, "limit": 20},
+                    "pagination": {
+                        "page": 1,
+                        "limit": 20,
+                        "total": 0,
+                        "has_next": False,
+                    },
+                },
             ),
         )
 
@@ -81,7 +91,9 @@ def test_discovery_reads_the_hyd_0_11_data_envelope() -> None:
 def test_discovery_retains_records_envelope_compatibility() -> None:
     """Removing the tested records compatibility would break cached test contracts."""
 
-    record = json.loads(DATA_ENVELOPE_FIXTURE_PATH.read_text(encoding="utf-8"))["data"][0]
+    record = json.loads(DATA_ENVELOPE_FIXTURE_PATH.read_text(encoding="utf-8"))["data"][
+        "items"
+    ][0]
     candidates = discover_xas(FixtureGateway({"XAS": [record]}))
 
     assert [candidate.dataset_code for candidate in candidates] == [
@@ -93,10 +105,34 @@ def test_discovery_retains_records_envelope_compatibility() -> None:
     "payload",
     [
         {},
-        {"mode": "dataset", "query": "XAS", "pagination": {}},
-        {"mode": "dataset", "query": "XAS", "data": {}, "pagination": {}},
-        {"mode": "dataset", "query": "XAS", "data": [42], "pagination": {}},
+        {"mode": "ilike", "query": "XAS", "pagination": {}},
+        {
+            "mode": "dataset",
+            "query": "XAS",
+            "data": {"items": [], "total": 0, "page": 1, "limit": 20},
+            "pagination": {"page": 1, "limit": 20, "total": 0, "has_next": False},
+        },
+        {
+            "mode": "ilike",
+            "query": "XANES",
+            "data": {"items": [], "total": 0, "page": 1, "limit": 20},
+            "pagination": {"page": 1, "limit": 20, "total": 0, "has_next": False},
+        },
+        {
+            "mode": "ilike",
+            "query": "XAS",
+            "data": {"items": [42], "total": 1, "page": 1, "limit": 20},
+            "pagination": {"page": 1, "limit": 20, "total": 1, "has_next": False},
+        },
         {"records": {}},
+        {"records": [], "extra": True},
+        {
+            "mode": "ilike",
+            "query": "XAS",
+            "data": {"items": [], "total": 0, "page": 1, "limit": 20},
+            "pagination": {"page": 1, "limit": 20, "total": 0, "has_next": False},
+            "records": [],
+        },
     ],
 )
 def test_discovery_rejects_unknown_json_shapes(payload: object) -> None:
@@ -106,6 +142,87 @@ def test_discovery_rejects_unknown_json_shapes(payload: object) -> None:
         discover_xas(EnvelopeGateway({"XAS": payload}))
 
     assert error.value.code == "unsupported_json"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"data": {"items": [], "total": 0, "page": 1}},
+        {
+            "data": {
+                "items": [],
+                "total": 0,
+                "page": 1,
+                "limit": 20,
+                "extra": True,
+            }
+        },
+        {"data": {"items": [], "total": True, "page": 1, "limit": 20}},
+        {"pagination": {"page": 1, "limit": 20, "total": 0}},
+        {
+            "pagination": {
+                "page": 1,
+                "limit": 20,
+                "total": 0,
+                "has_next": 0,
+            }
+        },
+        {
+            "pagination": {
+                "page": 2,
+                "limit": 20,
+                "total": 0,
+                "has_next": False,
+            }
+        },
+        {
+            "pagination": {
+                "page": 1,
+                "limit": 10,
+                "total": 0,
+                "has_next": False,
+            }
+        },
+        {
+            "pagination": {
+                "page": 1,
+                "limit": 20,
+                "total": 3,
+                "has_next": False,
+            }
+        },
+    ],
+)
+def test_discovery_rejects_invalid_real_hyd_pagination_contract(
+    change: dict[str, object],
+) -> None:
+    payload: dict[str, object] = {
+        "mode": "ilike",
+        "query": "XAS",
+        "data": {"items": [], "total": 0, "page": 1, "limit": 20},
+        "pagination": {"page": 1, "limit": 20, "total": 0, "has_next": False},
+    }
+    payload.update(change)
+
+    with pytest.raises(HydUnsupportedJsonError):
+        discover_xas(EnvelopeGateway({"XAS": payload}))
+
+
+def test_discovery_allows_empty_data_only_in_the_exact_real_envelope() -> None:
+    candidates = discover_xas(EnvelopeGateway({}))
+
+    assert candidates == ()
+
+
+def test_discovery_allows_documented_null_pagination_total() -> None:
+    payload = {
+        "mode": "ilike",
+        "query": "XAS",
+        "data": {"items": [], "total": 0, "page": 1, "limit": 20},
+        "pagination": {"page": 1, "limit": 20, "total": None, "has_next": False},
+    }
+
+    assert discover_xas(EnvelopeGateway({"XAS": payload})) == ()
 
 
 def test_discovery_deduplicates_catalog_hits_and_retains_search_evidence() -> None:

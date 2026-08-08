@@ -65,7 +65,7 @@ class RunPlan(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
-    schema_version: Literal["hyperspectrum-run-plan/v1"]
+    schema_version: Literal["hyperspectrum-run-plan/v2"]
     task: TaskSpec
     dataset_code: str
     dataset_version: str
@@ -205,7 +205,7 @@ def build_run_plan(
         }
     )
     return RunPlan(
-        schema_version="hyperspectrum-run-plan/v1",
+        schema_version="hyperspectrum-run-plan/v2",
         task=task,
         dataset_code=dataset.dataset_code,
         dataset_version=dataset_version,

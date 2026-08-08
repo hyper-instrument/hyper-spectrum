@@ -51,6 +51,7 @@ def installed_console(
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
     assert "hyperspectrum/resources/schemas/hyperspectrum-tool-v1.schema.json" in names
+    assert "hyperspectrum/resources/schemas/xas-m0-selection.schema.json" in names
     assert "hyperspectrum/resources/tools/xas/savgol/tool.yaml" in names
     assert "hyperspectrum/resources/tools/xas/xasdenoise/tool.yaml" in names
 
@@ -229,6 +230,10 @@ def test_root_and_packaged_resources_have_exact_byte_parity() -> None:
             resources.joinpath("schemas/hyperspectrum-tool-v1.schema.json"),
         ),
         (
+            ROOT / "docs/evidence/xas-m0-selection.schema.json",
+            resources.joinpath("schemas/xas-m0-selection.schema.json"),
+        ),
+        (
             ROOT / "tools/xas/savgol/tool.yaml",
             resources.joinpath("tools/xas/savgol/tool.yaml"),
         ),
@@ -269,6 +274,22 @@ def test_fresh_wheel_console_help_doctor_match_and_plan(
     )
     envelope = assert_success_envelope(planned)
     assert envelope["result"]["plan"]["tool_id"] == "savgol"  # type: ignore[index]
+
+    invalid_evidence = root / "invalid-evidence.json"
+    invalid_evidence.write_text("{}", encoding="utf-8")
+    assert_error_envelope(
+        command(
+            str(console),
+            "evidence",
+            "validate",
+            "--evidence-file",
+            str(invalid_evidence),
+            "--json",
+            env=environment,
+        ),
+        2,
+        "invalid_xas_m0_evidence",
+    )
 
 
 def test_installed_console_exit_categories_and_secret_probes(
@@ -603,6 +624,7 @@ def test_installed_generic_failure_redacts_quoted_diagnostics(
         ("data", "discover"),
         ("task", "recommend"),
         ("tools", "match"),
+        ("evidence", "validate"),
         ("run", "plan"),
         ("run", "local"),
     ],

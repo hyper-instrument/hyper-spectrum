@@ -123,6 +123,7 @@ def test_plan_preserves_every_reproducibility_input_and_detaches_parameters(
     result = plan(tmp_path, parameters=parameters)
     parameters["nested"]["mode"] = "mirror"  # type: ignore[index]
 
+    assert result.schema_version == "hyperspectrum-run-plan/v2"
     assert result.task == task()
     assert result.dataset_code == "synthetic-xas-denoising-fixture"
     assert result.dataset_version == "fixture-v1"

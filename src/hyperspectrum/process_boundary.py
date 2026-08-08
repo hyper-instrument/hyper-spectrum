@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import ipaddress
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -40,6 +41,21 @@ _QUOTED_KEY_VALUE = re.compile(
 )
 _QUERY_VALUE = re.compile(r"([?&])([^=&#\s]+)(=)([^&#\s]*)")
 _URL_USERINFO = re.compile(r"(?i)(://)[^/@\s]+@")
+_SINGLE_LABEL_URL_HOST = re.compile(
+    r"(?i)(?P<scheme>://)(?P<host>localhost|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)(?=[:/])"
+)
+_WINDOWS_ABSOLUTE_PATH = re.compile(r"(?i)\b[a-z]:\\(?:[^\\\s]+\\)*[^\\\s]+")
+_UNC_ABSOLUTE_PATH = re.compile(r"(?<!\\)\\\\(?:[^\\\s]+\\)+[^\\\s]+")
+_POSIX_ABSOLUTE_PATH = re.compile(
+    r"(?<![:/A-Za-z0-9_])/(?:[A-Za-z0-9._~-]+/)*[A-Za-z0-9._~-]+"
+)
+_ENDPOINT_HOST = re.compile(
+    r"(?ix)(?<![A-Za-z0-9_.-])(?:"
+    r"\[(?P<ipv6>[0-9a-f:]+)\]|"
+    r"(?P<ipv4>(?:[0-9]{1,3}\.){3}[0-9]{1,3})|"
+    r"(?P<host>localhost|[a-z0-9.-]+\.(?:internal|local|lan|localhost))"
+    r")(?:\:[0-9]{1,5})?"
+)
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -60,6 +76,11 @@ def redact_text(value: str) -> str:
         for line in value.splitlines(keepends=True)
     )
     redacted = _URL_USERINFO.sub(r"\1[REDACTED]@", redacted)
+    redacted = _SINGLE_LABEL_URL_HOST.sub(r"\g<scheme>[REDACTED]", redacted)
+    redacted = _WINDOWS_ABSOLUTE_PATH.sub(_REDACTED, redacted)
+    redacted = _UNC_ABSOLUTE_PATH.sub(_REDACTED, redacted)
+    redacted = _POSIX_ABSOLUTE_PATH.sub(_REDACTED, redacted)
+    redacted = _ENDPOINT_HOST.sub(_redact_private_endpoint, redacted)
     redacted = _BEARER.sub("Bearer [REDACTED]", redacted)
     redacted = _NAMED_VALUE.sub(_REDACTED, redacted)
     redacted = _QUOTED_KEY_VALUE.sub(
@@ -88,6 +109,24 @@ def redact_text(value: str) -> str:
         ),
         redacted,
     )
+
+
+def _redact_private_endpoint(match: re.Match[str]) -> str:
+    """Redact private endpoint hosts without exposing them in diagnostics."""
+
+    host = match.group("host")
+    if host is not None:
+        return _REDACTED
+    address_text = match.group("ipv4") or match.group("ipv6")
+    if address_text is None:
+        return match.group(0)
+    try:
+        address = ipaddress.ip_address(address_text)
+    except ValueError:
+        return match.group(0)
+    if address.is_private or address.is_loopback or address.is_link_local:
+        return _REDACTED
+    return match.group(0)
 
 
 def _redact_structured_diagnostic(value: str) -> str | None:

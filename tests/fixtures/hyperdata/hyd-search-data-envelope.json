@@ -1,8 +1,8 @@
 {
-  "mode": "dataset",
+  "mode": "ilike",
   "query": "XAS",
-  "data": [
-    {
+  "data": {
+    "items": [{
       "dataset_code": "public-real-envelope-xas",
       "dataset_version": "2026.08.1",
       "content_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -32,11 +32,15 @@
       },
       "access_status": "admitted_catalog",
       "source_kind": "volcano_catalog"
-    }
-  ],
+    }],
+    "total": 1,
+    "page": 1,
+    "limit": 20
+  },
   "pagination": {
     "page": 1,
-    "page_size": 20,
-    "total": 1
+    "limit": 20,
+    "total": 1,
+    "has_next": false
   }
 }

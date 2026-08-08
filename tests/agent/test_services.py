@@ -299,7 +299,7 @@ def test_plan_service_uses_public_planner_and_returns_serializable_plan(
 
         def model_dump(self, *, mode: str) -> dict[str, object]:
             assert mode == "json"
-            return {"schema_version": "hyperspectrum-run-plan/v1", "dry_run": True}
+            return {"schema_version": "hyperspectrum-run-plan/v2", "dry_run": True}
 
     def fake_build(**kwargs: object) -> Planned:
         observed.update(kwargs)
@@ -319,7 +319,7 @@ def test_plan_service_uses_public_planner_and_returns_serializable_plan(
     )
 
     assert response.result == {
-        "plan": {"schema_version": "hyperspectrum-run-plan/v1", "dry_run": True},
+        "plan": {"schema_version": "hyperspectrum-run-plan/v2", "dry_run": True},
         "plan_digest": "f" * 64,
     }
     assert observed["dry_run"] is True
@@ -338,7 +338,7 @@ def test_local_service_uses_public_executor(
     plan_file.write_text(
         json.dumps(
             {
-                "schema_version": "hyperspectrum-run-plan/v1",
+                "schema_version": "hyperspectrum-run-plan/v2",
                 "task": {
                     "schema_version": "hyperspectrum-task/v1",
                     "id": "xas-denoising",
@@ -413,3 +413,20 @@ def test_local_service_uses_public_executor(
     }
     assert observed["selected_sample_ids"] == ("sample-1", "sample-2")
     assert observed["source_npz"] == source
+
+
+def test_local_service_clearly_refuses_unbound_legacy_v1_plan(tmp_path: Path) -> None:
+    plan_file = tmp_path / "legacy-plan.json"
+    plan_file.write_text(
+        json.dumps({"schema_version": "hyperspectrum-run-plan/v1"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        agent.AgentRequestError, match="v1 lacks a bound sample selection"
+    ):
+        agent.run_local(
+            plan_file=plan_file,
+            source_npz=tmp_path / "unused.npz",
+            sample_ids=("sample-1",),
+        )

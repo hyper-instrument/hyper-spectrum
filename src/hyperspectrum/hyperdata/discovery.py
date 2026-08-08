@@ -28,7 +28,7 @@ def discover_xas(gateway: SearchGateway) -> tuple[DatasetCandidate, ...]:
     """
     observations: dict[str, list[tuple[str, Mapping[str, object]]]] = {}
     for query in XAS_QUERIES:
-        for record in _records_from_result(gateway.search(query)):
+        for record in _records_from_result(gateway.search(query), query):
             dataset_code = _optional_string(record.get("dataset_code"))
             if dataset_code is None:
                 continue
@@ -43,19 +43,70 @@ def discover_xas(gateway: SearchGateway) -> tuple[DatasetCandidate, ...]:
     return tuple(sorted(candidates, key=lambda candidate: -_score(candidate)))
 
 
-def _records_from_result(result: HydCommandResult) -> tuple[Mapping[str, object], ...]:
-    """Read the documented JSON payload envelope without table parsing."""
+def _records_from_result(
+    result: HydCommandResult, requested_query: str
+) -> tuple[Mapping[str, object], ...]:
+    """Read only the pinned hyd wire envelope or exact internal fixture shape."""
     payload = result.payload
     if not isinstance(payload, Mapping):
         raise HydUnsupportedJsonError("HyperData search JSON must be an object")
-    if "data" in payload:
-        records = payload["data"]
-    elif "records" in payload:
+    keys = set(payload)
+    if keys == {"mode", "query", "data", "pagination"}:
+        return _records_from_hyd_envelope(payload, requested_query)
+    if keys == {"records"}:
         records = payload["records"]
-    else:
+        return _require_object_array(records)
+    raise HydUnsupportedJsonError("HyperData search JSON has an unsupported shape")
+
+
+def _records_from_hyd_envelope(
+    payload: Mapping[str, object], requested_query: str
+) -> tuple[Mapping[str, object], ...]:
+    """Validate hyperdata-client 84404d53's `search --ilike --json` shape."""
+
+    if payload["mode"] != "ilike" or payload["query"] != requested_query:
+        raise HydUnsupportedJsonError("HyperData search mode or query does not match")
+    data = payload["data"]
+    pagination = payload["pagination"]
+    if not isinstance(data, Mapping) or set(data) != {
+        "items",
+        "total",
+        "page",
+        "limit",
+    }:
+        raise HydUnsupportedJsonError("HyperData search data has an unsupported shape")
+    if not isinstance(pagination, Mapping) or set(pagination) != {
+        "page",
+        "limit",
+        "total",
+        "has_next",
+    }:
         raise HydUnsupportedJsonError(
-            "HyperData search JSON has no supported result collection"
+            "HyperData search pagination has an unsupported shape"
         )
+    if (
+        not _is_nonnegative_int(data["total"])
+        or not _is_positive_int(data["page"])
+        or not _is_positive_int(data["limit"])
+        or not _is_positive_int(pagination["page"])
+        or not _is_positive_int(pagination["limit"])
+        or (
+            pagination["total"] is not None
+            and not _is_nonnegative_int(pagination["total"])
+        )
+        or type(pagination["has_next"]) is not bool
+    ):
+        raise HydUnsupportedJsonError(
+            "HyperData search pagination fields have invalid types or ranges"
+        )
+    if data["page"] != pagination["page"] or data["limit"] != pagination["limit"]:
+        raise HydUnsupportedJsonError("HyperData search pagination is inconsistent")
+    if pagination["total"] is not None and data["total"] != pagination["total"]:
+        raise HydUnsupportedJsonError("HyperData search total is inconsistent")
+    return _require_object_array(data["items"])
+
+
+def _require_object_array(records: object) -> tuple[Mapping[str, object], ...]:
     if not isinstance(records, Sequence) or isinstance(records, (str, bytes, bytearray)):
         raise HydUnsupportedJsonError(
             "HyperData search result collection must be a JSON array"
@@ -65,6 +116,14 @@ def _records_from_result(result: HydCommandResult) -> tuple[Mapping[str, object]
             "HyperData search result collection entries must be JSON objects"
         )
     return tuple(cast(Mapping[str, object], record) for record in records)
+
+
+def _is_nonnegative_int(value: object) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _is_positive_int(value: object) -> bool:
+    return type(value) is int and value >= 1
 
 
 def _candidate_from_observations(

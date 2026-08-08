@@ -11,6 +11,7 @@ from hyperspectrum.contracts import (
     MetricSpec,
     ObservationBundle,
     PredictionBundle,
+    PredictionBundleV2,
     TaskSpec,
 )
 
@@ -123,6 +124,101 @@ def test_prediction_requires_all_nonempty_provenance_digests() -> None:
                 "tool_digest": "d" * 64,
                 "data_digest": "e" * 64,
             },
+        )
+
+
+def test_prediction_v1_remains_compatible_with_nonempty_legacy_provenance() -> None:
+    prediction = PredictionBundle(
+        schema_version="hyperspectrum-prediction/v1",
+        run_id="run-legacy",
+        task_id="xas-denoising",
+        predictions=(artifact(role="prediction"),),
+        failures=(),
+        provenance={
+            "model_digest": "legacy-model",
+            "tool_digest": "legacy-tool",
+            "data_digest": "legacy-data",
+            "environment_digest": "legacy-environment",
+        },
+    )
+
+    assert prediction.schema_version == "hyperspectrum-prediction/v1"
+
+
+def prediction_v2_provenance() -> dict[str, str]:
+    return {
+        "model_digest": "1" * 64,
+        "tool_digest": "2" * 64,
+        "implementation_digest": "3" * 64,
+        "weight_digest": "none",
+        "data_digest": "4" * 64,
+        "environment_digest": "5" * 64,
+        "plan_digest": "6" * 64,
+        "plan_schema_version": "hyperspectrum-run-plan/v2",
+        "dataset_code": "public-xas",
+        "dataset_version": "2026.08.1",
+    }
+
+
+def test_prediction_v2_accepts_complete_selection_bound_provenance() -> None:
+    prediction = PredictionBundleV2(
+        schema_version="hyperspectrum-prediction/v2",
+        run_id="run-v2",
+        task_id="xas-denoising",
+        predictions=(artifact(role="prediction"),),
+        failures=(),
+        provenance=prediction_v2_provenance(),
+    )
+
+    assert prediction.provenance["plan_schema_version"] == (
+        "hyperspectrum-run-plan/v2"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("model_digest", "not-a-sha"),
+        ("tool_digest", "A" * 64),
+        ("implementation_digest", ""),
+        ("weight_digest", "missing"),
+        ("data_digest", "f" * 63),
+        ("environment_digest", None),
+        ("plan_digest", "0"),
+        ("plan_schema_version", "hyperspectrum-run-plan/v1"),
+        ("dataset_code", "   "),
+        ("dataset_version", ""),
+    ],
+)
+def test_prediction_v2_rejects_incomplete_or_unformatted_provenance(
+    field: str, value: object
+) -> None:
+    provenance: dict[str, object] = prediction_v2_provenance()
+    provenance[field] = value
+
+    with pytest.raises(ValidationError, match=field):
+        PredictionBundleV2(
+            schema_version="hyperspectrum-prediction/v2",
+            run_id="run-v2",
+            task_id="xas-denoising",
+            predictions=(artifact(role="prediction"),),
+            failures=(),
+            provenance=provenance,
+        )
+
+
+def test_prediction_v2_rejects_missing_required_provenance_field() -> None:
+    provenance = prediction_v2_provenance()
+    del provenance["implementation_digest"]
+
+    with pytest.raises(ValidationError, match="implementation_digest"):
+        PredictionBundleV2(
+            schema_version="hyperspectrum-prediction/v2",
+            run_id="run-v2",
+            task_id="xas-denoising",
+            predictions=(artifact(role="prediction"),),
+            failures=(),
+            provenance=provenance,
         )
 
 

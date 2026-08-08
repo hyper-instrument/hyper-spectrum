@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from hyperspectrum.contracts import PredictionBundle
+from hyperspectrum.contracts import PredictionBundleV2
 from hyperspectrum.execution import local
 from hyperspectrum.execution.local import execute_local_run
 from hyperspectrum.execution.plan import RunPlan
@@ -100,7 +100,9 @@ def test_local_savgol_smoke_publishes_a_complete_prediction_bundle_without_scori
     predictions_data = json.loads(
         (run_plan.output_directory / "predictions.json").read_text()
     )
-    bundle = PredictionBundle.model_validate(predictions_data)
+    bundle = PredictionBundleV2.model_validate(predictions_data)
+    assert bundle.schema_version == "hyperspectrum-prediction/v2"
+    assert bundle.provenance["plan_schema_version"] == "hyperspectrum-run-plan/v2"
     run_data = json.loads((run_plan.output_directory / "run.json").read_text())
     assert returned == bundle
     assert len(bundle.predictions) == 3

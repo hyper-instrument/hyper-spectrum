@@ -16,8 +16,7 @@ SCHEMA_PATH = (
 )
 
 
-@pytest.fixture
-def valid_evidence() -> dict[str, Any]:
+def make_valid_evidence() -> dict[str, Any]:
     """Return a hand-checked successful handoff with no real remote identifiers."""
 
     return {
@@ -118,6 +117,7 @@ def valid_evidence() -> dict[str, Any]:
             "prediction_count": 8,
             "failure_count": 0,
             "provenance": {
+                "prediction_schema_version": "hyperspectrum-prediction/v2",
                 "plan_digest": "9" * 64,
                 "model_digest": "a" * 64,
                 "tool_digest": "b" * 64,
@@ -135,6 +135,7 @@ def valid_evidence() -> dict[str, Any]:
         },
         "ace_handoff": {
             "dataset_id": "public-xas-pairs-2026-08-1",
+            "data_asset_id": "xas-inference-input",
             "data_asset_sha256": "5" * 64,
             "task_spec_sha256": "7" * 64,
             "primary_metric": {
@@ -147,6 +148,11 @@ def valid_evidence() -> dict[str, Any]:
         },
         "blockers": [],
     }
+
+
+@pytest.fixture
+def valid_evidence() -> dict[str, Any]:
+    return make_valid_evidence()
 
 
 def _validator() -> Draft202012Validator:
@@ -390,6 +396,28 @@ def test_schema_rejects_partial_prediction_coverage(
 
     invalid = copy.deepcopy(valid_evidence)
     invalid["smoke_run"]["prediction_count"] = 7
+
+    with pytest.raises(ValidationError):
+        _validator().validate(invalid)
+
+
+@pytest.mark.parametrize(
+    ("section", "field"),
+    [
+        ("ace_handoff", "data_asset_id"),
+        ("smoke_run.provenance", "prediction_schema_version"),
+    ],
+)
+def test_schema_requires_v2_prediction_and_named_ace_data_asset(
+    valid_evidence: dict[str, Any], section: str, field: str
+) -> None:
+    """M0 success cannot rely on an unbound v1 prediction or unnamed ACE bytes."""
+
+    invalid = copy.deepcopy(valid_evidence)
+    target: dict[str, Any] = invalid
+    for key in section.split("."):
+        target = target[key]
+    del target[field]
 
     with pytest.raises(ValidationError):
         _validator().validate(invalid)
