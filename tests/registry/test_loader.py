@@ -312,3 +312,55 @@ def test_registered_tools_are_discoverable_but_not_default_executable_until_avai
     assert registry.match(request) == ()
     assert "entrypoint-unresolvable" in registry.availability(savgol).reasons
     assert "entrypoint-unresolvable" in registry.availability(xasdenoise).reasons
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    [
+        "hyperspectrum:missing_function",
+        "hyperspectrum.registry:ToolRegistry",
+        "hyperspectrum.registry.models:ARTIFACT_ROLES",
+        "json:loads",
+    ],
+)
+def test_default_availability_rejects_unprovable_top_level_entrypoint_object(
+    entrypoint: str,
+) -> None:
+    # Break caught: a module could exist while its declared callable/object is missing or dynamic.
+    data = manifest()
+    data["entrypoint"] = entrypoint
+    data["verify"] = ["python3", "-c", "pass"]
+    data["weights"] = {"required": False, "state": "not-required", "allow_download": False}
+    tool = load_tool_manifest(data)
+
+    availability = ToolRegistry((tool,)).availability(tool)
+
+    assert availability.available is False
+    assert availability.reasons == ("entrypoint-unresolvable",)
+
+
+def test_default_availability_never_probes_host_for_container_tool() -> None:
+    # Break caught: a host-installed module or command could falsely validate a container image.
+    data = manifest()
+    data["runtime"] = {
+        "kind": "container",
+        "image": "registry.example/xas@sha256:" + "a" * 64,
+    }
+    data["entrypoint"] = "hyperspectrum.registry.loader:ToolRegistry"
+    data["verify"] = ["python3", "-m", "hyperspectrum.registry.loader"]
+    data["weights"] = {"required": False, "state": "not-required", "allow_download": False}
+    tool = load_tool_manifest(data)
+    request = ToolMatchRequest(
+        modality="xas",
+        task="denoising",
+        input_roles=("raw_signal",),
+        output_roles=("denoised_signal",),
+        license_policy=LicensePolicy.private_validation(),
+        weights_state="not-required",
+        resources=ResourceBudget(cpu=4, memory_gb=16, gpu_available=False),
+    )
+
+    registry = ToolRegistry((tool,))
+
+    assert registry.match(request) == ()
+    assert registry.availability(tool).reasons == ("container-unverified",)

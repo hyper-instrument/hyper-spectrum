@@ -307,6 +307,7 @@ class ToolMatchRequest(BaseModel):
 
 
 AvailabilityReason = Literal[
+    "container-unverified",
     "entrypoint-unresolvable",
     "verify-command-unresolvable",
     "verify-module-unresolvable",

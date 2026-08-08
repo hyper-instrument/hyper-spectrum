@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Callable, Mapping
 from functools import lru_cache
-from importlib.machinery import PathFinder
+from importlib.machinery import ModuleSpec, PathFinder
 from pathlib import Path
 from shutil import which
 
@@ -72,6 +73,9 @@ class ToolRegistry:
 
 def _safe_default_availability(tool: ToolManifest) -> ToolAvailability:
     """Resolve paths and command/module specs without importing or executing tool code."""
+    if tool.runtime.kind == "container":
+        return ToolAvailability(available=False, reasons=("container-unverified",))
+
     reasons: list[AvailabilityReason] = []
     if not _entrypoint_resolvable(tool.entrypoint):
         reasons.append("entrypoint-unresolvable")
@@ -89,7 +93,7 @@ def _safe_default_availability(tool: ToolManifest) -> ToolAvailability:
 def _entrypoint_resolvable(entrypoint: str) -> bool:
     if ":" in entrypoint:
         module_name, _, object_name = entrypoint.partition(":")
-        return bool(object_name) and _module_resolvable(module_name)
+        return _has_static_top_level_object(_module_spec(module_name), object_name)
     path = Path(entrypoint)
     return not path.is_absolute() and ".." not in path.parts and (_repository_root() / path).is_file()
 
@@ -107,15 +111,40 @@ def _verify_unavailability_reasons(argv: tuple[str, ...]) -> tuple[AvailabilityR
 
 def _module_resolvable(module_name: str) -> bool:
     """Find a dotted module spec recursively without executing package imports."""
+    return _module_spec(module_name) is not None
+
+
+def _module_spec(module_name: str) -> ModuleSpec | None:
+    """Find a dotted module spec recursively without executing package imports."""
     parts = module_name.split(".")
     if not parts or any(not part.isidentifier() for part in parts):
-        return False
+        return None
     spec = PathFinder.find_spec(parts[0])
     for part in parts[1:]:
         if spec is None or spec.submodule_search_locations is None:
-            return False
+            return None
         spec = PathFinder.find_spec(part, spec.submodule_search_locations)
-    return spec is not None
+    return spec
+
+
+def _has_static_top_level_object(spec: ModuleSpec | None, object_name: str) -> bool:
+    """Prove a local module defines an object directly, without importing its code."""
+    if spec is None or not object_name.isidentifier() or spec.origin is None:
+        return False
+    source_path = Path(spec.origin)
+    if source_path.suffix != ".py" or not source_path.is_relative_to(_repository_root()):
+        return False
+    try:
+        module = ast.parse(source_path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return False
+    return any(_defines_top_level_object(statement, object_name) for statement in module.body)
+
+
+def _defines_top_level_object(statement: ast.stmt, object_name: str) -> bool:
+    if isinstance(statement, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)):
+        return statement.name == object_name
+    return False
 
 
 def _repository_root() -> Path:
