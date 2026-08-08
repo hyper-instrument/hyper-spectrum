@@ -9,6 +9,7 @@ dependencies = [
     "numpy>=2,<3",
     "scipy>=1.13,<2",
     "pyyaml>=6,<7",
+    "jsonschema>=4.23,<5",
 ]
 
 [dependency-groups]
@@ -17,6 +18,8 @@ dev = [
     "pytest-cov",
     "ruff",
     "mypy",
+    "types-pyyaml>=6.0.12.20260724",
+    "types-jsonschema>=4.26.0.20260518",
 ]
 
 [tool.pytest.ini_options]

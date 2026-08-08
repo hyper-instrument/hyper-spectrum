@@ -1,0 +1,32 @@
+schema_version: hyperspectrum-tool/v1
+id: savgol
+version: "0.1.0"
+modalities: [xas]
+tasks: [denoising]
+runtime:
+  kind: python
+entrypoint: hyperspectrum.plugins.xas.baselines:savgol_filter
+inputs:
+  - role: raw_signal
+    kind: dense_array
+outputs:
+  - role: denoised_signal
+    kind: dense_array
+resources:
+  cpu: 1
+  memory_gb: 1
+  gpu: none
+verify: [python, -c, "from scipy.signal import savgol_filter"]
+source:
+  kind: local-package
+  package: hyperspectrum
+  version: "0.1.0"
+  revision: 93c6842085a92d3f6be988d9b523ad44f2734bd7
+license: unknown
+distribution: private-validation-only
+weights:
+  required: false
+  state: not-required
+  allow_download: false
+training:
+  enabled: false
