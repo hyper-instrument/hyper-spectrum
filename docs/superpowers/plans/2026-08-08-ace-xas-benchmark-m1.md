@@ -13,10 +13,11 @@
 - Start only after the M0 completion gate in `2026-08-08-hyper-spectrum-xas-agent-m0.md` passes and `docs/evidence/xas-m0-selection.json` exists with valid real digests.
 - Work in a dedicated ACE Benchmark branch/worktree; do not modify or reopen the merged PR #109 contract ownership.
 - Pin HyperSpectrum by immutable Git commit in the adapter/image. Do not duplicate its domain logic inside ACE.
-- Use the standard research adapter interface: `IMAGE_ENTRYPOINT --data /data [--weights /weights/model.bin]... [--weights /archive/model.tar.gz!relative/internal/path] --max-samples N --out /out/metrics.json`. `--weights` is optional and repeatable; `!inner` is only the archive-plus-inner-path form.
+- Use the standard research adapter interface: `IMAGE_ENTRYPOINT --data /data [--weights /weights/model.bin]... [--weights /archive/model.tar.gz!relative/internal/path] [--max-samples N] --out /out/metrics.json`. `--weights` is optional and repeatable; `!inner` is only the archive-plus-inner-path form. `--max-samples` is optional and must be omitted for a full-split run.
 - Select the outer backend through ACE settings. For Bohr use `ACEBENCH_LB_RESEARCH_BACKEND=bohr-job` together with `ACEBENCH_LB_RESEARCH_BOHR_PROJECT_ID` and `ACEBENCH_LB_RESEARCH_BOHR_MACHINE_TYPE`; `research run` has no `--backend` option.
 - Keep the HyperSpectrum `RunPlan` backend local inside the container. It must not duplicate ACE `ExecutionSpec`, backend selection, staging, metrics ingestion, or report generation.
 - In M1, register each classical algorithm as an independent ACE `ResearchModel` with its own model directory and thin adapter. Do not select algorithms through a sibling runtime manifest; a shared parameterized adapter requires a separate ACE framework contract change first.
+- Release images fail closed. With the frozen e62 CLI, never combine `research build --verify` with `--push`: that implementation pushes before it refuses a failed probe. Build and verify without push, push the exact repository/tag only after verification passes, then pull/re-resolve the registry digest and pullability before recording it.
 - Bohr has no bind mounts. Stage data, weights, and adapter through the existing backend and record the resolved image digest.
 - Never use random initialization when weights are absent or invalid. Set the ACE `ResearchModel.status` to `pending_weights` and preserve the exact blocker in evidence and milestone gates; ACE variants and assets have no `blocked` status field.
 - Never copy or publicly redistribute `Even-Ma/xas` or XASDenoise until licensing allows it. A private validation image may reference a pinned external checkout.
@@ -44,7 +45,7 @@ The existing Uni-XAS image is import/compile verified but has no weights and no 
 | HyperSpectrum handoff | ACE owner/representation | Required rule |
 | --- | --- | --- |
 | Dataset/version/content digest and each file digest | ACE dataset plus `ResearchAsset` records | Preserve the verified values; never substitute placeholders. |
-| Asset role, file, size, SHA-256, materialization mode, `inner_path` (Python; `innerPath` on JSON wire), semantics, and full-split counts/source | `ResearchAsset`/`ResearchAssetRef` and `ExecutionSpec` mount requests | Record `mount-file`, `mount-dir`, or `unpack` per asset; never infer materialization from a suffix. For a directly executable mount request, `inner_path` is present exactly when mode is `unpack`. |
+| Asset role, file, size, SHA-256, materialization mode, M0 `inner_path`, semantics, and full-split counts/source | M0 JSON `inner_path` → ACE Python `inner_path` → ACE wire/report `innerPath` | Preserve the snake_case M0 source field, map it explicitly at the ACE boundary, and record `mount-file`, `mount-dir`, or `unpack` per asset. Never infer materialization from a suffix. For a directly executable mount request, `inner_path` is present exactly when mode is `unpack`. |
 | Split and selection manifest, selected sample IDs, count, and selection digest | Run inputs and redacted evidence | Local and Bohr must account for the exact same full test set. |
 | HyperSpectrum plan/model/tool/implementation/weight/data/environment/selection identities | `PredictionBundle`, run manifest, and parity evidence | These are domain/runtime identities, not the ACE adapter digest. |
 | ACE `adapterDigest` | Hash of the staged `common/entry.py` and model-specific `run.py` | ACE computes it; HyperSpectrum must not fabricate or relabel it. |
@@ -91,7 +92,7 @@ Raw datasets, weights, logs, signed URLs, and full reports remain in configured 
 
 **Files:** `scripts/check_xas_m0_evidence.py`, `tests/test_check_xas_m0_evidence.py`.
 
-1. Write tests that load valid, missing-field, null-digest, signed-URL, local-private-path, inference-only, and blocked evidence fixtures. A valid fixture must include dataset code/version/digest; every asset's role, file, size, SHA-256, materialization mode, JSON `innerPath` exactly when mode is `unpack`, and semantics; label/ground-truth roles; split group keys; selected sample IDs and selection digest; full-split sample/file counts and source; license/access state; HyperSpectrum commit; and source query timestamp.
+1. Write tests that load valid, missing-field, null-digest, signed-URL, local-private-path, inference-only, and blocked evidence fixtures. A valid source M0 JSON fixture must include dataset code/version/digest; every asset's role, file, size, SHA-256, materialization mode, snake_case `inner_path` exactly when mode is `unpack`, and semantics; label/ground-truth roles; split group keys; selected sample IDs and selection digest; full-split sample/file counts and source; license/access state; HyperSpectrum commit; and source query timestamp. The validator must not require wire-format `innerPath`; the ACE handoff mapper converts M0 `inner_path` to ACE Python `inner_path`, whose serialized/report form is `innerPath`.
 2. Run the focused tests; expected result: missing script failure.
 3. Implement a pure validator plus CLI. Exit 0 and emit canonical JSON for valid scoreable evidence; exit 2 with stable error codes for invalid or non-scoreable evidence.
 4. The validator must reject placeholder strings, zeroed SHA-256 values, suffix-inferred or missing materialization, `http` URLs with query credentials, `/home/` and `/data/` source paths, missing license/access declarations, and fabricated ACE-only `adapterDigest`, image digest, backend, or `backendHandle` values.
@@ -123,15 +124,17 @@ Raw datasets, weights, logs, signed URLs, and full reports remain in configured 
 5. Implement each `run.py` as translation only: ACE arguments → model-fixed local HyperSpectrum `RunPlan`/executor → ACE metrics envelope. Do not reimplement axis validation, XAS baselines, or metric formulas, and do not duplicate ACE execution/staging/report logic.
 6. Fix tool selection by the ACE model directory and adapter code. Do not depend on a sibling `tool-manifest.json`, because the frozen ACE adapter stages and hashes only `common/entry.py` plus the model-specific `run.py`. Fixed-weight execution must call `resolve_weights`; classical adapters must reject a non-empty weights path to prevent accidental model confusion. If one adapter must receive a variant identity at runtime, stop and propose a separate ACE framework change.
 7. Assert any incomplete `PredictionBundle`, failed sample, or missing prediction exits non-zero without publishing `metrics.json`.
-8. Build and probe every classical model through ACE so `verify.py` runs inside the built dependency environment, not through bare host Python:
+8. Build and probe every classical model through ACE so `verify.py` runs inside the built dependency environment, not through bare host Python. Do not pass `--push` in this step:
 
    ```bash
-   uv run acebench-lb research build <model-id> --verify --push --json
+   uv run acebench-lb research build <model-id> \
+     --registry <registry> --verify --json
    ```
 
-   Assert `verified: true`, `verifyDeclared: true`, `pushed: true`, and a resolved image digest. Inspect the built image through the configured Docker host and assert its entrypoint is `python /opt/acebench/run.py`.
+   Assert exit 0, `verified: true`, and `verifyDeclared: true`. Inspect the built image through the configured Docker host and assert its entrypoint is `python /opt/acebench/run.py`. Treat the build response's `digest` as a local pre-push identity, not a registry digest.
+9. Only after step 8 passes, push the exact returned `<repository>:<tag>` with the configured Docker host. Pull that tag from the registry (preferably on a clean daemon with the same access path Bohr will use), resolve its `RepoDigest`, and record the resulting `<repository>@sha256:...` plus pullability evidence. A failed probe, push, pull, missing `RepoDigest`, or changed digest is a hard gate; do not seed/use the image. If this cannot be automated safely with the frozen CLI, open an ACE prerequisite instead of using combined `--verify --push`.
 
-9. Commit: `feat: add thin XAS denoising research adapters`.
+10. Commit: `feat: add thin XAS denoising research adapters`.
 
 ## Task 4: Verify the Fixed Weights and Build the Private Model Image
 

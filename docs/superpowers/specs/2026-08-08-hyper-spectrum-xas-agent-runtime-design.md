@@ -307,12 +307,12 @@ adapter digest。因此 M1 不得让一个 adapter 依赖同级 `tool-manifest.j
 ```text
 IMAGE_ENTRYPOINT --data /data [--weights /weights/model.bin]... \
                  [--weights /archive/model.tar.gz!relative/internal/path] \
-                 --max-samples N --out /out/metrics.json
+                 [--max-samples N] --out /out/metrics.json
 ```
 
 `--weights` 可选且可重复；`!inner` 只用于需要解包并选择内部路径的 archive，不是普通
 权重路径的可选后缀。ACE 与 adapter 的 Python 字段名为 `inner_path`，JSON wire 名为
-`innerPath`。
+`innerPath`。`--max-samples` 同样可选；完整划分运行必须省略它。
 
 ACE `ExecutionSpec` 持有 model/variant/dataset、镜像、参数、环境变量、输入输出、资源
 和超时，并负责 staging、metrics 摄取和 `research-report-context-1` 报告。adapter
@@ -327,6 +327,14 @@ ACE `ExecutionSpec` 持有 model/variant/dataset、镜像、参数、环境变�
 外部构建镜像只能通过经过同样 in-image probe 的显式 `--image <pullable-registry-tag>`
 覆盖进入运行。
 
+e62 的 `research build --verify --push` 不是 fail-closed：它在最终拒绝失败 probe 之前
+已经执行 push。因此镜像发布必须分段：先带目标 registry 名构建并 `--verify --json`
+但不 push；确认 exit 0、`verified: true`、`verifyDeclared: true` 后，才单独 push 返回的
+精确 repository/tag；随后从 registry 重新 pull/resolve `RepoDigest` 和 Bohr pullability。
+build JSON 的 pre-push `digest` 只视为本地 identity，不作为 registry digest。任何阶段
+失败都停止；若冻结 CLI 无法安全自动化该流程，先建立 ACE prerequisite，不能退回组合
+`--verify --push`。
+
 本地路径适合数据已经在 5090 或用户本地 GPU 的场景。Bohr 通过
 `ACEBENCH_LB_RESEARCH_BACKEND=bohr-job`、`ACEBENCH_LB_RESEARCH_BOHR_PROJECT_ID` 和
 `ACEBENCH_LB_RESEARCH_BOHR_MACHINE_TYPE` 配置；`research run` 没有 `--backend` 参数。
@@ -334,10 +342,11 @@ Bohr 路径由 ACE 暂存 adapter、数据与权重，选择命名 GPU SKU，提
 选择性回收输出。运行记录保存：
 
 - HyperData dataset/version、每项资产的 role/file/size/SHA-256/materialization/
-  `inner_path`（Python，JSON wire 为 `innerPath`）/semantics，以及全量 split 来源与
+  M0 JSON `inner_path`/semantics，以及全量 split 来源与
   数量；materialization 必须逐资产声明为
   `mount-file`、`mount-dir` 或 `unpack`，不能按后缀猜测；直接映射到 `MountRequest` 时，
-  `inner_path` 仅且必须随 `unpack` 出现；
+  显式执行 M0 JSON `inner_path` → ACE Python `inner_path` → ACE wire/report `innerPath`；
+  Python `inner_path` 仅且必须随 `unpack` 出现；
 - TaskSpec、split/selection manifest、selected sample IDs、selection digest 和 evaluator
   版本；
 - HyperSpectrum plan/model/tool/implementation/data/environment/selection 摘要；
