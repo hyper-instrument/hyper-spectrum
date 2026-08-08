@@ -36,6 +36,7 @@ than deleting or overwriting it. Create a non-executable review plan:
   --verdict-file VERDICT.json \
   --tool-id savgol \
   --output-directory RUN_DIR \
+  --sample-id SAMPLE_ID \
   --max-samples 8 \
   --dry-run \
   --json
@@ -44,6 +45,11 @@ than deleting or overwriting it. Create a non-executable review plan:
 Preserve the single envelope, plan digest, dataset/tool/implementation/weight/
 environment digests, resource budget, parameters, sample limit, destination,
 warnings, and blockers as evidence.
+
+Repeat `--sample-id` to bind every predeclared sample ID during planning, in the
+exact deterministic execution order. Use the identical ordered IDs for dry-run,
+the executable plan, and `run local`; changing a member or its order requires a
+new plan and plan digest.
 
 Ground truth is readiness and later ACE-evaluation evidence only. Never read clean
 arrays to choose parameters, samples, preprocessing, or outputs. Keep the declared

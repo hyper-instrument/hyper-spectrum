@@ -82,6 +82,7 @@ def run_plan(
     verdict_file: Annotated[Path, typer.Option("--verdict-file")],
     tool_id: Annotated[str, typer.Option("--tool-id")],
     output_directory: Annotated[Path, typer.Option("--output-directory")],
+    sample_ids: Annotated[list[str], typer.Option("--sample-id")],
     max_samples: Annotated[int, typer.Option("--max-samples", min=1)] = 8,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     json_output: Annotated[
@@ -99,6 +100,7 @@ def run_plan(
         tool_id=tool_id,
         output_directory=output_directory,
         max_samples=max_samples,
+        sample_ids=tuple(sample_ids),
         dry_run=dry_run,
     )
 

@@ -6,7 +6,7 @@ import ast
 import json
 import platform
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from importlib.machinery import ModuleSpec, PathFinder
@@ -15,7 +15,14 @@ from importlib.util import resolve_name
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 from typing_extensions import Self
 
 from hyperspectrum.contracts import TaskSpec
@@ -72,6 +79,9 @@ class RunPlan(BaseModel):
     backend: Literal["local"]
     resources: ResourceBudget
     max_samples: int = Field(ge=1)
+    selection_policy: Literal["explicit_order"]
+    selection_policy_version: Literal["1"]
+    selected_sample_ids: tuple[str, ...]
     output_directory: Path
     dry_run: bool
     parameters: FrozenJsonMapping
@@ -107,6 +117,23 @@ class RunPlan(BaseModel):
         if value != "none" and _SHA256.fullmatch(value) is None:
             raise ValueError("weight digest must be 'none' or a 64-character SHA-256")
         return value
+
+    @field_validator("selected_sample_ids")
+    @classmethod
+    def require_explicit_unique_selection(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value:
+            raise ValueError("selected sample IDs must not be empty")
+        if any(not sample_id.strip() for sample_id in value):
+            raise ValueError("selected sample IDs must be non-blank")
+        if len(set(value)) != len(value):
+            raise ValueError("selected sample IDs must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def require_selection_within_limit(self) -> Self:
+        if len(self.selected_sample_ids) > self.max_samples:
+            raise ValueError("selected sample count exceeds max_samples")
+        return self
 
     @field_validator("parameters", mode="before")
     @classmethod
@@ -148,6 +175,7 @@ def build_run_plan(
     backend: Literal["local"],
     resources: ResourceBudget,
     max_samples: int,
+    selected_sample_ids: Sequence[str],
     output_directory: Path,
     dry_run: bool,
     parameters: Mapping[str, object],
@@ -191,6 +219,9 @@ def build_run_plan(
         backend=backend,
         resources=resources,
         max_samples=max_samples,
+        selection_policy="explicit_order",
+        selection_policy_version="1",
+        selected_sample_ids=tuple(selected_sample_ids),
         output_directory=output_directory,
         dry_run=dry_run,
         parameters=frozen_parameters,

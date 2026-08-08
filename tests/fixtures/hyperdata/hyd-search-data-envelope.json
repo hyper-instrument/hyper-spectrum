@@ -1,0 +1,42 @@
+{
+  "mode": "dataset",
+  "query": "XAS",
+  "data": [
+    {
+      "dataset_code": "public-real-envelope-xas",
+      "dataset_version": "2026.08.1",
+      "content_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "title": "Public XAS envelope contract record",
+      "description": "Redacted catalog evidence shaped like hyd 0.11.2 output",
+      "file_count": 2,
+      "parsed_file_count": 2,
+      "formats": ["NPZ"],
+      "license": "CC-BY-4.0",
+      "parser_status": {
+        "kind": "spectroscopy",
+        "valid": true
+      },
+      "axis_evidence": {
+        "energy_axis": {
+          "valid": true,
+          "unit": "eV"
+        }
+      },
+      "label_evidence": {
+        "verified": true,
+        "ground_truth_roles": ["clean_spectrum"]
+      },
+      "pairing_evidence": {
+        "verified": true,
+        "roles": ["noisy_spectrum", "clean_spectrum"]
+      },
+      "access_status": "admitted_catalog",
+      "source_kind": "volcano_catalog"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 20,
+    "total": 1
+  }
+}

@@ -314,6 +314,7 @@ def test_plan_service_uses_public_planner_and_returns_serializable_plan(
         tool_id="savgol",
         output_directory=tmp_path / "run",
         max_samples=8,
+        sample_ids=("sample-1", "sample-2"),
         dry_run=True,
     )
 
@@ -322,6 +323,7 @@ def test_plan_service_uses_public_planner_and_returns_serializable_plan(
         "plan_digest": "f" * 64,
     }
     assert observed["dry_run"] is True
+    assert observed["selected_sample_ids"] == ("sample-1", "sample-2")
     assert observed["data_origin"] == "real"
     assert observed["parameters"] == {"window_length": 5, "polyorder": 2}
 
@@ -360,6 +362,9 @@ def test_local_service_uses_public_executor(
                 "backend": "local",
                 "resources": {"cpu": 1, "memory_gb": 1, "gpu_available": False},
                 "max_samples": 2,
+                "selection_policy": "explicit_order",
+                "selection_policy_version": "1",
+                "selected_sample_ids": ["sample-1", "sample-2"],
                 "output_directory": str(tmp_path / "run"),
                 "dry_run": False,
                 "parameters": {"window_length": 5, "polyorder": 2},

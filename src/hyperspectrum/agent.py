@@ -206,6 +206,7 @@ def plan_run(
     tool_id: str,
     output_directory: Path,
     max_samples: int,
+    sample_ids: tuple[str, ...],
     dry_run: bool,
 ) -> ServiceResponse:
     """Build one immutable local plan from explicit public contract files."""
@@ -229,6 +230,7 @@ def plan_run(
             backend="local",
             resources=ResourceBudget(cpu=1, memory_gb=1.0, gpu_available=False),
             max_samples=max_samples,
+            selected_sample_ids=sample_ids,
             output_directory=output_directory,
             dry_run=dry_run,
             parameters={"window_length": 5, "polyorder": 2},

@@ -170,6 +170,10 @@ def test_run_plan_forwards_only_declared_inputs(
             str(output),
             "--max-samples",
             "8",
+            "--sample-id",
+            "sample-1",
+            "--sample-id",
+            "sample-2",
             "--dry-run",
             "--json",
         ],
@@ -189,6 +193,7 @@ def test_run_plan_forwards_only_declared_inputs(
             "tool_id": "savgol",
             "output_directory": output,
             "max_samples": 8,
+            "sample_ids": ("sample-1", "sample-2"),
             "dry_run": True,
         }
     ]

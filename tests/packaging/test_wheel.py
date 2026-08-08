@@ -212,6 +212,8 @@ def plan_command(
         tool_id,
         "--output-directory",
         str(root / f"run-{tool_id}"),
+        "--sample-id",
+        "sample-1",
         "--dry-run",
         "--json",
     )

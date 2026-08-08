@@ -7,9 +7,16 @@ from pathlib import Path
 import pytest
 
 from hyperspectrum.hyperdata.discovery import XAS_QUERIES, discover_xas
+from hyperspectrum.hyperdata.gateway import HydUnsupportedJsonError
 from hyperspectrum.hyperdata.models import HydCommandResult
 
 FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "hyperdata" / "xas-search.json"
+DATA_ENVELOPE_FIXTURE_PATH = (
+    Path(__file__).parents[1]
+    / "fixtures"
+    / "hyperdata"
+    / "hyd-search-data-envelope.json"
+)
 
 
 class FixtureGateway:
@@ -30,8 +37,75 @@ class FixtureGateway:
         )
 
 
+class EnvelopeGateway:
+    """Return exact JSON envelopes at the immutable command-result boundary."""
+
+    def __init__(self, payloads_by_query: Mapping[str, object]) -> None:
+        self.payloads_by_query = payloads_by_query
+        self.queries: list[str] = []
+
+    def search(self, query: str) -> HydCommandResult:
+        self.queries.append(query)
+        return HydCommandResult(
+            argv=("hyd", "search", query, "--ilike", "--json"),
+            returncode=0,
+            stdout="",
+            stderr="",
+            payload=self.payloads_by_query.get(
+                query,
+                {"mode": "dataset", "query": query, "data": [], "pagination": {}},
+            ),
+        )
+
+
 def load_fixture() -> dict[str, dict[str, list[dict[str, object]]]]:
     return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+def test_discovery_reads_the_hyd_0_11_data_envelope() -> None:
+    """Reading only the old records key would silently erase real catalog hits."""
+
+    payload = json.loads(DATA_ENVELOPE_FIXTURE_PATH.read_text(encoding="utf-8"))
+    gateway = EnvelopeGateway({"XAS": payload})
+
+    candidates = discover_xas(gateway)
+
+    assert gateway.queries == list(XAS_QUERIES)
+    assert [candidate.dataset_code for candidate in candidates] == [
+        "public-real-envelope-xas"
+    ]
+    assert candidates[0].dataset_version == "2026.08.1"
+    assert candidates[0].content_digest == "a" * 64
+
+
+def test_discovery_retains_records_envelope_compatibility() -> None:
+    """Removing the tested records compatibility would break cached test contracts."""
+
+    record = json.loads(DATA_ENVELOPE_FIXTURE_PATH.read_text(encoding="utf-8"))["data"][0]
+    candidates = discover_xas(FixtureGateway({"XAS": [record]}))
+
+    assert [candidate.dataset_code for candidate in candidates] == [
+        "public-real-envelope-xas"
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"mode": "dataset", "query": "XAS", "pagination": {}},
+        {"mode": "dataset", "query": "XAS", "data": {}, "pagination": {}},
+        {"mode": "dataset", "query": "XAS", "data": [42], "pagination": {}},
+        {"records": {}},
+    ],
+)
+def test_discovery_rejects_unknown_json_shapes(payload: object) -> None:
+    """Returning zero candidates for an unknown shape would hide a client drift."""
+
+    with pytest.raises(HydUnsupportedJsonError) as error:
+        discover_xas(EnvelopeGateway({"XAS": payload}))
+
+    assert error.value.code == "unsupported_json"
 
 
 def test_discovery_deduplicates_catalog_hits_and_retains_search_evidence() -> None:

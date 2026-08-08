@@ -68,6 +68,8 @@ def execute_local_run(
     if plan.backend != "local":
         raise ValueError("local executor requires the local backend")
     selected = _validate_selection(selected_sample_ids, plan.max_samples)
+    if selected != plan.selected_sample_ids:
+        raise ValueError("supplied sample selection does not match the run plan")
     destination = plan.output_directory
     if destination.exists():
         raise FileExistsError(f"run directory already exists: {destination}")

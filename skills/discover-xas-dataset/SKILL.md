@@ -20,7 +20,20 @@ readiness evidence; it does not download data, score models, or own a leaderboar
    failed checks and stop. Do not inspect credential/profile files, install a
    client, open a login flow, or substitute another command.
 
-2. Run discovery with the exact user-authorized profile:
+2. Verify the exact profile through the public CLI only:
+
+   ```bash
+   hyd --profile volcano whoami
+   ```
+
+   Replace `volcano` only with the requested profile name. Require both a zero
+   exit code and an explicit server-confirmed identity for the selected server.
+   A locally cached identity, an identity explicitly unconfirmed by the server,
+   or any other cached or unverified output cannot pass, even when the command
+   exits zero. Treat that state as an authentication/connection failure and
+   stop. Never inspect a profile file, credential, token, or environment secret.
+
+3. Run discovery with the exact user-authorized profile:
 
    ```bash
    .venv/bin/hyperspectrum data discover --modality xas --profile volcano --json
@@ -32,7 +45,7 @@ readiness evidence; it does not download data, score models, or own a leaderboar
    source queries, parser/axis evidence, ground-truth evidence, pairing evidence,
    readiness score, warnings, and blockers.
 
-3. Return the unaltered envelope or a JSON projection that cites the source
+4. Return the unaltered envelope or a JSON projection that cites the source
    candidate fields. State ambiguity or no result explicitly. Never infer labels,
    ground truth, pairing, version, digest, access, or license from names alone.
 

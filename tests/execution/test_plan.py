@@ -104,6 +104,7 @@ def plan(tmp_path: Path, **changes: object) -> RunPlan:
         "backend": "local",
         "resources": resources(),
         "max_samples": 3,
+        "selected_sample_ids": ("feo-1", "feo-2", "fe2o3-1"),
         "output_directory": tmp_path / "run",
         "dry_run": False,
         "parameters": {"window_length": 5, "polyorder": 2},
@@ -132,6 +133,9 @@ def test_plan_preserves_every_reproducibility_input_and_detaches_parameters(
     assert result.backend == "local"
     assert result.resources == resources()
     assert result.max_samples == 3
+    assert result.selection_policy == "explicit_order"
+    assert result.selection_policy_version == "1"
+    assert result.selected_sample_ids == ("feo-1", "feo-2", "fe2o3-1")
     assert result.output_directory == tmp_path / "run"
     assert result.dry_run is False
     assert result.data_origin == "synthetic-test"
@@ -140,6 +144,42 @@ def test_plan_preserves_every_reproducibility_input_and_detaches_parameters(
     assert len(result.plan_digest) == 64
     with pytest.raises(TypeError):
         result.parameters["new"] = "forbidden"  # type: ignore[index]
+
+
+def test_plan_digest_binds_the_exact_ordered_sample_selection(tmp_path: Path) -> None:
+    # Break caught: two different three-sample selections could share a plan/run identity.
+    first = plan(
+        tmp_path,
+        selected_sample_ids=("sample-1", "sample-2", "sample-3"),
+    )
+    different_member = plan(
+        tmp_path,
+        selected_sample_ids=("sample-1", "sample-2", "sample-4"),
+    )
+    different_order = plan(
+        tmp_path,
+        selected_sample_ids=("sample-3", "sample-2", "sample-1"),
+    )
+
+    assert first.plan_digest != different_member.plan_digest
+    assert first.plan_digest != different_order.plan_digest
+
+
+@pytest.mark.parametrize(
+    "selected",
+    [
+        (),
+        ("sample-1", "sample-1"),
+        ("sample-1", ""),
+        ("sample-1", "sample-2", "sample-3", "sample-4"),
+    ],
+)
+def test_planning_rejects_invalid_or_over_limit_sample_selection(
+    tmp_path: Path, selected: tuple[str, ...]
+) -> None:
+    # Break caught: an ambiguous or oversized selection could be admitted into identity.
+    with pytest.raises(ValueError, match="selected sample"):
+        plan(tmp_path, selected_sample_ids=selected)
 
 
 def test_implementation_digest_covers_entrypoint_and_local_dependency_bytes(

@@ -7,6 +7,7 @@ from typing import Protocol, cast
 
 from hyperspectrum.contracts.json import freeze_json_mapping
 
+from .gateway import HydUnsupportedJsonError
 from .models import DatasetCandidate, HydCommandResult
 
 XAS_QUERIES = ("XAS", "XANES", "EXAFS", "absorption edge")
@@ -46,11 +47,24 @@ def _records_from_result(result: HydCommandResult) -> tuple[Mapping[str, object]
     """Read the documented JSON payload envelope without table parsing."""
     payload = result.payload
     if not isinstance(payload, Mapping):
-        return ()
-    records = payload.get("records")
+        raise HydUnsupportedJsonError("HyperData search JSON must be an object")
+    if "data" in payload:
+        records = payload["data"]
+    elif "records" in payload:
+        records = payload["records"]
+    else:
+        raise HydUnsupportedJsonError(
+            "HyperData search JSON has no supported result collection"
+        )
     if not isinstance(records, Sequence) or isinstance(records, (str, bytes, bytearray)):
-        return ()
-    return tuple(cast(Mapping[str, object], record) for record in records if isinstance(record, Mapping))
+        raise HydUnsupportedJsonError(
+            "HyperData search result collection must be a JSON array"
+        )
+    if any(not isinstance(record, Mapping) for record in records):
+        raise HydUnsupportedJsonError(
+            "HyperData search result collection entries must be JSON objects"
+        )
+    return tuple(cast(Mapping[str, object], record) for record in records)
 
 
 def _candidate_from_observations(

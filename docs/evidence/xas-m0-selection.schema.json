@@ -1,0 +1,982 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyper-instrument.org/schemas/hyperspectrum/xas-m0-selection-v1.json",
+  "title": "Successful real XAS M0 selection evidence",
+  "description": "A redacted, scoreable HyperSpectrum-to-ACE handoff. Blocked and inference-only observations belong in the development record, not in a selection document.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "query",
+    "runtime",
+    "dataset",
+    "task",
+    "assets",
+    "selection",
+    "smoke_run",
+    "ace_handoff",
+    "blockers"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "hyperspectrum-xas-m0-selection/v1"
+    },
+    "query": {
+      "$ref": "#/$defs/query"
+    },
+    "runtime": {
+      "$ref": "#/$defs/runtime"
+    },
+    "dataset": {
+      "$ref": "#/$defs/dataset"
+    },
+    "task": {
+      "$ref": "#/$defs/task"
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/asset"
+      }
+    },
+    "selection": {
+      "$ref": "#/$defs/selection"
+    },
+    "smoke_run": {
+      "$ref": "#/$defs/smokeRun"
+    },
+    "ace_handoff": {
+      "$ref": "#/$defs/aceHandoff"
+    },
+    "blockers": {
+      "type": "array",
+      "maxItems": 0,
+      "items": {
+        "$ref": "#/$defs/safeText"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "input_sample_count": {
+                "const": 1
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "prediction_count": {
+                "const": 1
+              }
+            }
+          },
+          "selection": {
+            "properties": {
+              "selected_sample_count": {"const": 1}
+            }
+          },
+          "dataset": {
+            "properties": {
+              "counts": {
+                "properties": {
+                  "sample_count": {"minimum": 1}
+                }
+              },
+              "full_split": {
+                "properties": {
+                  "sample_count": {"minimum": 1}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "input_sample_count": {
+                "const": 2
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "prediction_count": {
+                "const": 2
+              }
+            }
+          },
+          "selection": {
+            "properties": {
+              "selected_sample_count": {"const": 2}
+            }
+          },
+          "dataset": {
+            "properties": {
+              "counts": {
+                "properties": {
+                  "sample_count": {"minimum": 2}
+                }
+              },
+              "full_split": {
+                "properties": {
+                  "sample_count": {"minimum": 2}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "input_sample_count": {
+                "const": 3
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "prediction_count": {
+                "const": 3
+              }
+            }
+          },
+          "selection": {
+            "properties": {
+              "selected_sample_count": {"const": 3}
+            }
+          },
+          "dataset": {
+            "properties": {
+              "counts": {
+                "properties": {
+                  "sample_count": {"minimum": 3}
+                }
+              },
+              "full_split": {
+                "properties": {
+                  "sample_count": {"minimum": 3}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "input_sample_count": {
+                "const": 4
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "prediction_count": {
+                "const": 4
+              }
+            }
+          },
+          "selection": {
+            "properties": {
+              "selected_sample_count": {"const": 4}
+            }
+          },
+          "dataset": {
+            "properties": {
+              "counts": {
+                "properties": {
+                  "sample_count": {"minimum": 4}
+                }
+              },
+              "full_split": {
+                "properties": {
+                  "sample_count": {"minimum": 4}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "input_sample_count": {
+                "const": 5
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "prediction_count": {
+                "const": 5
+              }
+            }
+          },
+          "selection": {
+            "properties": {
+              "selected_sample_count": {"const": 5}
+            }
+          },
+          "dataset": {
+            "properties": {
+              "counts": {
+                "properties": {
+                  "sample_count": {"minimum": 5}
+                }
+              },
+              "full_split": {
+                "properties": {
+                  "sample_count": {"minimum": 5}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "input_sample_count": {
+                "const": 6
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "prediction_count": {
+                "const": 6
+              }
+            }
+          },
+          "selection": {
+            "properties": {
+              "selected_sample_count": {"const": 6}
+            }
+          },
+          "dataset": {
+            "properties": {
+              "counts": {
+                "properties": {
+                  "sample_count": {"minimum": 6}
+                }
+              },
+              "full_split": {
+                "properties": {
+                  "sample_count": {"minimum": 6}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "input_sample_count": {
+                "const": 7
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "prediction_count": {
+                "const": 7
+              }
+            }
+          },
+          "selection": {
+            "properties": {
+              "selected_sample_count": {"const": 7}
+            }
+          },
+          "dataset": {
+            "properties": {
+              "counts": {
+                "properties": {
+                  "sample_count": {"minimum": 7}
+                }
+              },
+              "full_split": {
+                "properties": {
+                  "sample_count": {"minimum": 7}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "input_sample_count": {
+                "const": 8
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "smoke_run": {
+            "properties": {
+              "prediction_count": {
+                "const": 8
+              }
+            }
+          },
+          "selection": {
+            "properties": {
+              "selected_sample_count": {"const": 8}
+            }
+          },
+          "dataset": {
+            "properties": {
+              "counts": {
+                "properties": {
+                  "sample_count": {"minimum": 8}
+                }
+              },
+              "full_split": {
+                "properties": {
+                  "sample_count": {"minimum": 8}
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "safeText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!.*(?:[Bb]earer\\s|[Aa]ccess[_ -]?[Tt]oken|[Rr]efresh[_ -]?[Tt]oken|[Pp]assword|[Cc]redential|[Ss]ecret))(?!.*https?://[^\\s?]+\\?\\S+)(?!.*(?:/home/|/data/|/Users/|/tmp/|/private/|/var/)).*$"
+    },
+    "identifier": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/safeText"
+        },
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        }
+      ]
+    },
+    "artifactName": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/safeText"
+        },
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        }
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$"
+    },
+    "gitCommit": {
+      "type": "string",
+      "pattern": "^(?!0{40}$)[0-9a-f]{40}$"
+    },
+    "query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "profile", "client_version", "source_queries"],
+      "properties": {
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "profile": {
+          "$ref": "#/$defs/identifier"
+        },
+        "client_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "source_queries": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/safeText"
+          }
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host_class",
+        "hyperspectrum_commit",
+        "wheel_sha256",
+        "hyperdata_client_commit"
+      ],
+      "properties": {
+        "host_class": {
+          "const": "5090"
+        },
+        "hyperspectrum_commit": {
+          "$ref": "#/$defs/gitCommit"
+        },
+        "wheel_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "hyperdata_client_commit": {
+          "$ref": "#/$defs/gitCommit"
+        }
+      }
+    },
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "version",
+        "content_digest",
+        "title",
+        "description",
+        "license_state",
+        "license",
+        "access_state",
+        "source",
+        "counts",
+        "full_split",
+        "formats"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/identifier"
+        },
+        "version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "content_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "title": {
+          "$ref": "#/$defs/safeText"
+        },
+        "description": {
+          "$ref": "#/$defs/safeText"
+        },
+        "license_state": {
+          "enum": ["declared", "restricted"]
+        },
+        "license": {
+          "$ref": "#/$defs/safeText"
+        },
+        "access_state": {
+          "const": "authorized"
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "profile", "evidence"],
+          "properties": {
+            "kind": {
+              "const": "hyperdata_catalog"
+            },
+            "profile": {
+              "$ref": "#/$defs/identifier"
+            },
+            "evidence": {
+              "const": "live_json_search"
+            }
+          }
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "file_count",
+            "parsed_file_count",
+            "sample_count",
+            "split_count",
+            "source"
+          ],
+          "properties": {
+            "file_count": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "parsed_file_count": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "sample_count": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "split_count": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "source": {
+              "$ref": "#/$defs/identifier"
+            }
+          }
+        },
+        "full_split": {
+          "$ref": "#/$defs/fullSplit"
+        },
+        "formats": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        }
+      }
+    },
+    "fullSplit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "file_count", "sample_count", "source"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "file_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reference"],
+          "properties": {
+            "kind": {
+              "const": "catalog_split_contract"
+            },
+            "reference": {
+              "$ref": "#/$defs/identifier"
+            }
+          }
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verdict",
+        "task_id",
+        "task_type",
+        "ground_truth_roles",
+        "split_group_keys",
+        "reason_codes"
+      ],
+      "properties": {
+        "verdict": {
+          "const": "scoreable"
+        },
+        "task_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "task_type": {
+          "$ref": "#/$defs/identifier"
+        },
+        "ground_truth_roles": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        },
+        "split_group_keys": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["sample_id", "compound_id", "acquisition_id"]
+          }
+        },
+        "reason_codes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "role",
+        "file_name",
+        "size_bytes",
+        "sha256",
+        "materialization",
+        "byte_provenance",
+        "inner_path",
+        "semantics"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "role": {
+          "$ref": "#/$defs/identifier"
+        },
+        "file_name": {
+          "$ref": "#/$defs/artifactName"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "materialization": {
+          "enum": ["mount-file", "mount-dir", "unpack"]
+        },
+        "byte_provenance": {
+          "$ref": "#/$defs/byteProvenance"
+        },
+        "inner_path": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/safeText"
+                },
+                {
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+                }
+              ]
+            }
+          ]
+        },
+        "semantics": {
+          "$ref": "#/$defs/assetSemantics"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "materialization": {
+                "const": "unpack"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "inner_path": {
+                "type": "string"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "inner_path": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "version",
+        "ordered_sample_ids_sha256",
+        "selected_sample_count",
+        "max_samples"
+      ],
+      "properties": {
+        "algorithm": {
+          "enum": ["explicit_order", "catalog_order_first_n"]
+        },
+        "version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "ordered_sample_ids_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "selected_sample_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "max_samples": {
+          "const": 8
+        }
+      }
+    },
+    "byteProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity_contract",
+        "source_dataset_digest",
+        "source_asset_id",
+        "source_availability"
+      ],
+      "properties": {
+        "identity_contract": {
+          "enum": ["catalog_exact_bytes", "registered_derived_asset"]
+        },
+        "source_dataset_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_asset_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "source_availability": {
+          "const": "authorized"
+        }
+      }
+    },
+    "assetSemantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "modality",
+        "role",
+        "npz_keys",
+        "energy_unit",
+        "target_data_excluded"
+      ],
+      "properties": {
+        "modality": {
+          "const": "xas"
+        },
+        "role": {
+          "const": "inference_input"
+        },
+        "npz_keys": {
+          "type": "array",
+          "prefixItems": [
+            {"const": "energy"},
+            {"const": "noisy"},
+            {"const": "sample_ids"},
+            {"const": "group_ids"},
+            {"const": "energy_unit"}
+          ],
+          "items": false,
+          "minItems": 5,
+          "maxItems": 5
+        },
+        "energy_unit": {
+          "const": "eV"
+        },
+        "target_data_excluded": {
+          "const": true
+        }
+      }
+    },
+    "smokeRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "max_samples",
+        "input_sample_count",
+        "prediction_count",
+        "failure_count",
+        "provenance",
+        "artifacts"
+      ],
+      "properties": {
+        "status": {
+          "const": "completed"
+        },
+        "max_samples": {
+          "const": 8
+        },
+        "input_sample_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "prediction_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "failure_count": {
+          "const": 0
+        },
+        "provenance": {
+          "$ref": "#/$defs/smokeProvenance"
+        },
+        "artifacts": {
+          "$ref": "#/$defs/smokeArtifacts"
+        }
+      }
+    },
+    "smokeProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_digest",
+        "model_digest",
+        "tool_digest",
+        "implementation_digest",
+        "weight_digest",
+        "data_digest",
+        "environment_digest",
+        "dataset_digest"
+      ],
+      "properties": {
+        "plan_digest": {"$ref": "#/$defs/sha256"},
+        "model_digest": {"$ref": "#/$defs/sha256"},
+        "tool_digest": {"$ref": "#/$defs/sha256"},
+        "implementation_digest": {"$ref": "#/$defs/sha256"},
+        "weight_digest": {
+          "oneOf": [
+            {"const": "none"},
+            {"$ref": "#/$defs/sha256"}
+          ]
+        },
+        "data_digest": {"$ref": "#/$defs/sha256"},
+        "environment_digest": {"$ref": "#/$defs/sha256"},
+        "dataset_digest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "smokeArtifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prediction_bundle_sha256",
+        "run_manifest_sha256",
+        "artifact_names"
+      ],
+      "properties": {
+        "prediction_bundle_sha256": {"$ref": "#/$defs/sha256"},
+        "run_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "artifact_names": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/artifactName"}
+        }
+      }
+    },
+    "aceHandoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dataset_id",
+        "data_asset_sha256",
+        "task_spec_sha256",
+        "primary_metric",
+        "runtime_owner",
+        "formal_evaluator"
+      ],
+      "properties": {
+        "dataset_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "data_asset_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "task_spec_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "primary_metric": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["key", "direction", "aggregation"],
+          "properties": {
+            "key": {
+              "const": "normalized_spectrum_rmse"
+            },
+            "direction": {
+              "const": "min"
+            },
+            "aggregation": {
+              "const": "grouped_bootstrap"
+            }
+          }
+        },
+        "runtime_owner": {
+          "const": "HyperSpectrum"
+        },
+        "formal_evaluator": {
+          "const": "ACE Benchmark"
+        }
+      }
+    }
+  }
+}

@@ -29,7 +29,7 @@ The first XAS story uses these commands:
 .venv/bin/hyperspectrum data discover --modality xas --profile volcano --json
 .venv/bin/hyperspectrum task recommend --candidate-file CANDIDATE.json --json
 .venv/bin/hyperspectrum tools match --task xas-denoising --json
-.venv/bin/hyperspectrum run plan --task-file TASK.json --candidate-file CANDIDATE.json --verdict-file VERDICT.json --tool-id savgol --output-directory RUN_DIR --max-samples 8 --dry-run --json
+.venv/bin/hyperspectrum run plan --task-file TASK.json --candidate-file CANDIDATE.json --verdict-file VERDICT.json --tool-id savgol --output-directory RUN_DIR --sample-id SAMPLE_ID --max-samples 8 --dry-run --json
 .venv/bin/hyperspectrum run local --plan-file PLAN.json --source-npz NOISY_INPUT.npz --sample-id SAMPLE_ID --json
 ```
 

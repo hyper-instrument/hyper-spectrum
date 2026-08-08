@@ -57,6 +57,7 @@ def inference_plan(tmp_path: Path, **changes: object) -> tuple[Path, RunPlan]:
     values: dict[str, object] = {
         "dataset": dataset_for_source(source),
         "verdict": verdict_for_source(source),
+        "selected_sample_ids": fixture_ids(),
     }
     values.update(changes)
     return source, plan(tmp_path, **values)
@@ -145,6 +146,26 @@ def test_local_savgol_smoke_publishes_a_complete_prediction_bundle_without_scori
     assert_no_scoring_fields(run_data)
 
 
+def test_executor_rejects_selection_that_differs_from_the_plan(tmp_path: Path) -> None:
+    # Break caught: callers could reuse one plan/run identity for a different sample set.
+    planned = fixture_ids(2)
+    supplied = fixture_ids(3)[1:]
+    source, run_plan = inference_plan(
+        tmp_path,
+        selected_sample_ids=planned,
+    )
+
+    with pytest.raises(ValueError, match="does not match the run plan"):
+        execute_local_run(
+            run_plan,
+            tool=savgol(),
+            selected_sample_ids=supplied,
+            source_npz=source,
+        )
+
+    assert not run_plan.output_directory.exists()
+
+
 def test_executor_runs_fresh_verified_source_not_a_preimported_callable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -156,7 +177,9 @@ def test_executor_runs_fresh_verified_source_not_a_preimported_callable(
 
     monkeypatch.setattr(baselines, "savgol_filter", wrong_callable)
 
-    source, run_plan = inference_plan(tmp_path)
+    source, run_plan = inference_plan(
+        tmp_path, selected_sample_ids=fixture_ids(1)
+    )
     bundle = execute_local_run(
         run_plan,
         tool=savgol(),
@@ -181,7 +204,9 @@ def test_executor_uses_verified_dependency_bytes_not_cached_module_objects(
             self.intensity = np.zeros_like(values["intensity"])
             self.energy_unit = values["energy_unit"]
 
-    source, run_plan = inference_plan(tmp_path)
+    source, run_plan = inference_plan(
+        tmp_path, selected_sample_ids=fixture_ids(1)
+    )
     monkeypatch.setattr(arrays, "XASSpectrum", WrongSpectrum)
 
     bundle = execute_local_run(
@@ -203,7 +228,9 @@ def test_executor_rejects_changed_local_dependency_bytes(
     # Break caught: arrays.py could change after planning while every recorded digest stayed fixed.
     dependency = (ROOT / "src/hyperspectrum/plugins/xas/arrays.py").resolve()
     original_read_bytes = Path.read_bytes
-    source, run_plan = inference_plan(tmp_path)
+    source, run_plan = inference_plan(
+        tmp_path, selected_sample_ids=fixture_ids(1)
+    )
 
     def changed_read_bytes(path: Path) -> bytes:
         contents = original_read_bytes(path)
@@ -321,6 +348,7 @@ def test_sample_ids_cannot_escape_the_array_artifact_directory(tmp_path: Path) -
     run_plan = plan(
         tmp_path,
         max_samples=1,
+        selected_sample_ids=(malicious_id,),
         dataset=dataset_for_source(source),
         verdict=verdict_for_source(source),
     )
@@ -383,6 +411,7 @@ def test_inference_source_rejects_every_extra_array_before_tool_loading(
     np.savez(source, **values)
     run_plan = plan(
         tmp_path,
+        selected_sample_ids=fixture_ids(1),
         dataset=dataset_for_source(source),
         verdict=verdict_for_source(source),
     )
@@ -418,6 +447,7 @@ def test_separately_digested_noisy_only_source_executes_successfully(
         )
     run_plan = plan(
         tmp_path,
+        selected_sample_ids=fixture_ids(2),
         dataset=dataset_for_source(source),
         verdict=verdict_for_source(source),
     )
@@ -453,6 +483,7 @@ def test_structured_noisy_array_is_rejected_before_tool_loading(
         )
     run_plan = plan(
         tmp_path,
+        selected_sample_ids=fixture_ids(1),
         dataset=dataset_for_source(source),
         verdict=verdict_for_source(source),
     )
@@ -533,6 +564,7 @@ def test_unsafe_energy_is_rejected_before_entrypoint_or_tool_loading(
         )
     run_plan = plan(
         tmp_path,
+        selected_sample_ids=fixture_ids(1),
         dataset=dataset_for_source(source),
         verdict=verdict_for_source(source),
     )
@@ -582,6 +614,7 @@ def test_exact_integer_energy_axes_execute_after_float64_canonicalization(
         )
     run_plan = plan(
         tmp_path,
+        selected_sample_ids=fixture_ids(1),
         dataset=dataset_for_source(source),
         verdict=verdict_for_source(source),
     )

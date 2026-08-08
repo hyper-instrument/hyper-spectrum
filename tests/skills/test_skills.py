@@ -44,6 +44,9 @@ def test_discovery_skill_is_read_only_evidence_led_and_fail_closed() -> None:
 
     for required in (
         "hyperspectrum doctor --json",
+        "hyd --profile volcano whoami",
+        "server-confirmed identity",
+        "cached or unverified output cannot pass",
         "data discover --modality xas --profile volcano --json",
         "read-only",
         "credential/profile files",
@@ -64,6 +67,7 @@ def test_run_skill_enforces_dry_run_leakage_overwrite_and_authority_gates() -> N
         "task recommend --candidate-file",
         "tools match --task xas-denoising --json",
         "run plan",
+        "bind every predeclared sample id during planning",
         "--dry-run",
         "does not exist",
         "never read clean",
