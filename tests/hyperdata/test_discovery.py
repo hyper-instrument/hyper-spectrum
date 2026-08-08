@@ -209,6 +209,75 @@ def test_duplicate_hits_merge_all_evidence_and_keep_misparse_conservative() -> N
     assert duplicate.evidence["readiness_score"] < by_code["clean-comparator"].evidence["readiness_score"]
 
 
+def test_unverified_label_roles_cannot_borrow_verification_from_another_hit() -> None:
+    """Catches promoting an unverified label claim through a separate empty verification."""
+    verified_but_empty = {
+        "dataset_code": "split-label-evidence",
+        "dataset_version": None,
+        "content_digest": None,
+        "title": "Split label evidence",
+        "description": "",
+        "file_count": 1,
+        "parsed_file_count": 0,
+        "formats": ["DAT"],
+        "license": None,
+        "parser_status": {"kind": "generic_text", "valid": False},
+        "axis_evidence": {"energy_axis": {"valid": False, "unit": None}},
+        "label_evidence": {"verified": True, "ground_truth_roles": []},
+        "pairing_evidence": {"verified": False, "roles": []},
+        "access_status": "admitted_catalog",
+        "source_kind": "volcano_catalog",
+    }
+    claimed_but_unverified = {
+        **verified_but_empty,
+        "label_evidence": {"verified": False, "ground_truth_roles": ["oxidation_state"]},
+    }
+    gateway = FixtureGateway(
+        {"XAS": [verified_but_empty], "XANES": [claimed_but_unverified]}
+    )
+
+    candidate = discover_xas(gateway)[0]
+
+    assert candidate.evidence["ground_truth_roles"] == ("oxidation_state",)
+    assert candidate.evidence["label_evidence"]["verified"] is False  # type: ignore[index]
+    assert candidate.evidence["label_evidence"]["ground_truth_roles"] == ()  # type: ignore[index]
+    assert candidate.evidence["readiness_score"] == 0
+
+
+def test_unverified_pairing_roles_cannot_borrow_verification_from_another_hit() -> None:
+    """Catches promoting an unverified pairing claim through a separate empty verification."""
+    verified_but_empty = {
+        "dataset_code": "split-pairing-evidence",
+        "dataset_version": None,
+        "content_digest": None,
+        "title": "Split pairing evidence",
+        "description": "",
+        "file_count": 1,
+        "parsed_file_count": 0,
+        "formats": ["DAT"],
+        "license": None,
+        "parser_status": {"kind": "generic_text", "valid": False},
+        "axis_evidence": {"energy_axis": {"valid": False, "unit": None}},
+        "label_evidence": {"verified": False, "ground_truth_roles": []},
+        "pairing_evidence": {"verified": True, "roles": []},
+        "access_status": "admitted_catalog",
+        "source_kind": "volcano_catalog",
+    }
+    claimed_but_unverified = {
+        **verified_but_empty,
+        "pairing_evidence": {"verified": False, "roles": ["structure", "spectrum"]},
+    }
+    gateway = FixtureGateway(
+        {"XAS": [verified_but_empty], "XANES": [claimed_but_unverified]}
+    )
+
+    candidate = discover_xas(gateway)[0]
+
+    assert candidate.evidence["pairing_evidence"]["verified"] is False  # type: ignore[index]
+    assert candidate.evidence["pairing_evidence"]["roles"] == ()  # type: ignore[index]
+    assert candidate.evidence["readiness_score"] == 0
+
+
 def test_esri_misparsed_asc_never_becomes_a_valid_energy_axis() -> None:
     """Catches treating generic ASC parser output as XAS energy-axis evidence."""
     clean = {

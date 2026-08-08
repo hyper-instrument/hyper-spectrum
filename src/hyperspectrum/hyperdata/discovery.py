@@ -186,11 +186,15 @@ def _aggregate_role_evidence(
     evidence = tuple(
         cast(Mapping[str, object], observation[evidence_key]) for observation in observations
     )
+    verified_roles = _sorted_unique_strings(
+        role
+        for item in evidence
+        if _truth(item.get("verified"))
+        for role in _string_tuple(item.get(roles_key))
+    )
     return {
-        "verified": any(_truth(item.get("verified")) for item in evidence),
-        roles_key: _sorted_unique_strings(
-            role for item in evidence for role in _string_tuple(item.get(roles_key))
-        ),
+        "verified": bool(verified_roles),
+        roles_key: verified_roles,
     }
 
 
