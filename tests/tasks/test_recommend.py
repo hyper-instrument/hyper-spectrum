@@ -5,9 +5,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import pytest
+from pydantic import ValidationError
 
 from hyperspectrum.hyperdata.models import DatasetCandidate
-from hyperspectrum.tasks.recommend import profile_xas_candidate, recommend_xas_tasks
+from hyperspectrum.tasks.recommend import (
+    ReadinessVerdict,
+    profile_xas_candidate,
+    recommend_xas_tasks,
+)
 
 
 def candidate(
@@ -230,3 +235,66 @@ def test_lcf_weight_regression_requires_verified_composition_in_one_observation(
     assert [(verdict.status, verdict.candidate_tasks) for verdict in verdicts] == [
         ("inference_only", ())
     ]
+
+
+@pytest.mark.parametrize(
+    "task,roles,split_keys,limitations",
+    [
+        ("denoising", ("unverified_clean_claim",), ("sample_id",), ()),
+        ("denoising", ("average_spectrum",), ("sample_id",), ()),
+        ("forward_spectrum_prediction", ("clean_spectrum",), ("compound_id",), ()),
+        ("oxidation_state_classification", ("unknown_label",), ("sample_id",), ()),
+        ("lcf_weight_regression", ("unknown_composition",), ("compound_id",), ()),
+        ("forward_spectrum_prediction", ("spectrum",), ("row_id",), ()),
+    ],
+)
+def test_scoreable_verdict_rejects_noncanonical_truth_or_unsafe_splits(
+    task: str,
+    roles: tuple[str, ...],
+    split_keys: tuple[str, ...],
+    limitations: tuple[str, ...],
+) -> None:
+    """Catches public constructors bypassing task truth or leakage contracts."""
+    with pytest.raises(ValidationError):
+        ReadinessVerdict(
+            status="scoreable",
+            reasons=("declared_test_evidence",),
+            candidate_tasks=(task,),
+            ground_truth_roles=roles,
+            split_group_keys=split_keys,
+            limitations=limitations,
+        )
+
+
+@pytest.mark.parametrize(
+    "task,roles,split_keys,limitations",
+    [
+        ("denoising", ("clean_spectrum",), ("sample_id",), ()),
+        (
+            "denoising",
+            ("average_spectrum",),
+            ("sample_id", "acquisition_id"),
+            ("xas_proxy_ground_truth_repeated_scan_average",),
+        ),
+        ("forward_spectrum_prediction", ("spectrum",), ("compound_id",), ()),
+        ("oxidation_state_classification", ("oxidation_state",), ("sample_id",), ()),
+        ("lcf_weight_regression", ("composition",), ("compound_id",), ()),
+    ],
+)
+def test_scoreable_verdict_accepts_canonical_task_contracts(
+    task: str,
+    roles: tuple[str, ...],
+    split_keys: tuple[str, ...],
+    limitations: tuple[str, ...],
+) -> None:
+    """Catches rejecting a legitimate public scoreable task contract."""
+    verdict = ReadinessVerdict(
+        status="scoreable",
+        reasons=("declared_test_evidence",),
+        candidate_tasks=(task,),
+        ground_truth_roles=roles,
+        split_group_keys=split_keys,
+        limitations=limitations,
+    )
+
+    assert verdict.candidate_tasks == (task,)

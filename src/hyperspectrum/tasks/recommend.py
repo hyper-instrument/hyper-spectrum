@@ -10,6 +10,15 @@ from typing_extensions import Self
 
 from hyperspectrum.hyperdata.models import DatasetCandidate
 
+_SAFE_SPLIT_GROUP_KEYS = frozenset({"sample_id", "compound_id", "acquisition_id"})
+_PROXY_LIMITATION = "xas_proxy_ground_truth_repeated_scan_average"
+_TASK_GROUND_TRUTH_ROLES = {
+    "denoising": frozenset({"clean_spectrum", "average_spectrum"}),
+    "forward_spectrum_prediction": frozenset({"spectrum"}),
+    "oxidation_state_classification": frozenset({"oxidation_state"}),
+    "lcf_weight_regression": frozenset({"mixture_composition", "composition"}),
+}
+
 
 class ReadinessVerdict(BaseModel):
     """An immutable task recommendation with its scoring and split contract."""
@@ -27,13 +36,26 @@ class ReadinessVerdict(BaseModel):
     @model_validator(mode="after")
     def require_scoreable_contract(self) -> Self:
         """Prevent a quantitative recommendation without truth and leakage guards."""
-        if self.status == "scoreable":
-            if not self.candidate_tasks:
-                raise ValueError("scoreable verdicts require a candidate task")
-            if not self.ground_truth_roles:
-                raise ValueError("scoreable verdicts require a ground-truth role")
-            if not self.split_group_keys:
-                raise ValueError("scoreable verdicts require split group keys")
+        if self.status != "scoreable":
+            if self.candidate_tasks or self.ground_truth_roles or self.split_group_keys:
+                raise ValueError("non-scoreable verdicts require empty task contracts")
+            return self
+        if len(self.candidate_tasks) != 1:
+            raise ValueError("scoreable verdicts require exactly one candidate task")
+        task = self.candidate_tasks[0]
+        allowed_roles = _TASK_GROUND_TRUTH_ROLES.get(task)
+        if allowed_roles is None:
+            raise ValueError("scoreable verdicts require a canonical candidate task")
+        if len(self.ground_truth_roles) != 1 or self.ground_truth_roles[0] not in allowed_roles:
+            raise ValueError("scoreable verdicts require a task-consistent ground-truth role")
+        if not _SAFE_SPLIT_GROUP_KEYS.intersection(self.split_group_keys):
+            raise ValueError("scoreable verdicts require a safe split group key")
+        if (
+            task == "denoising"
+            and self.ground_truth_roles == ("average_spectrum",)
+            and _PROXY_LIMITATION not in self.limitations
+        ):
+            raise ValueError("average-spectrum denoising requires a documented proxy limitation")
         return self
 
 
@@ -125,7 +147,7 @@ def recommend_xas_tasks(profile: XASCandidateProfile) -> tuple[ReadinessVerdict,
                 reason="xas_verified_repeated_scan_average_proxy",
                 roles=("average_spectrum",),
                 split_keys=("sample_id", "acquisition_id"),
-                limitations=("xas_proxy_ground_truth_repeated_scan_average",),
+                limitations=(_PROXY_LIMITATION,),
                 details=(
                     "The repeated-scan average is a documented proxy ground truth, not independent clean truth.",
                 ),
