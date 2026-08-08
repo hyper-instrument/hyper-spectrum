@@ -10,9 +10,10 @@ from .gateway import (
     HydUnsupportedClientError,
     HydUnsupportedJsonError,
 )
-from .models import HydCommandResult
+from .models import DatasetCandidate, HydCommandResult
 
 __all__ = [
+    "DatasetCandidate",
     "HydAuthenticationError",
     "HydClientNotFoundError",
     "HydCommandError",

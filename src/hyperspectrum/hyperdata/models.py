@@ -9,8 +9,11 @@ from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
 from typing_extensions import Self
 
 from hyperspectrum.contracts.json import (
+    FrozenJsonMapping,
     FrozenJsonValue,
+    freeze_json_mapping,
     freeze_json_value,
+    thaw_json_mapping,
     thaw_json_value,
 )
 
@@ -45,6 +48,44 @@ class HydCommandResult(BaseModel):
         self, *, update: Mapping[str, Any] | None = None, deep: bool = False
     ) -> Self:
         """Revalidate updates so Pydantic copies retain payload immutability."""
+        _ = deep
+        data = self.model_dump(round_trip=True)
+        if update is not None:
+            data.update(update)
+        return type(self).model_validate(data)
+
+
+class DatasetCandidate(BaseModel):
+    """Immutable catalog evidence for a possible spectroscopy dataset."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
+
+    dataset_code: str
+    dataset_version: str | None
+    content_digest: str | None
+    title: str
+    description: str
+    file_count: int
+    parsed_file_count: int
+    formats: tuple[str, ...]
+    license: str | None
+    evidence: FrozenJsonMapping
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def freeze_evidence(cls, value: object) -> FrozenJsonMapping:
+        """Detach nested discovery evidence from caller-owned JSON objects."""
+        return freeze_json_mapping(value)
+
+    @field_serializer("evidence")
+    def serialize_evidence(self, value: FrozenJsonMapping) -> object:
+        """Expose standard JSON values through Pydantic serialization."""
+        return thaw_json_mapping(value)
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        """Revalidate updates so Pydantic copies retain evidence immutability."""
         _ = deep
         data = self.model_dump(round_trip=True)
         if update is not None:
