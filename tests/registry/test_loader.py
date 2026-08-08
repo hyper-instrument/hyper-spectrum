@@ -12,6 +12,7 @@ from hyperspectrum.registry.loader import ToolRegistry, load_tool_manifest
 from hyperspectrum.registry.models import (
     LicensePolicy,
     ResourceBudget,
+    ToolAvailability,
     ToolMatchRequest,
 )
 
@@ -81,6 +82,45 @@ def test_rejects_mutable_runtime_image() -> None:
         load_tool_manifest(data)
 
 
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    [
+        ({"kind": "container"}, "container runtime requires an image"),
+        (
+            {
+                "kind": "git",
+                "repository": "https://github.com/Even-Ma/xas.git",
+                "release": "latest",
+            },
+            "immutable release",
+        ),
+        (
+            {
+                "kind": "local-package",
+                "package": "hyperspectrum",
+                "version": "0.1.0",
+                "revision": "main",
+            },
+            "immutable revision",
+        ),
+    ],
+)
+def test_schema_and_model_reject_mutable_runtime_or_source_pin(
+    replacement: dict[str, str], message: str
+) -> None:
+    # Break caught: a container or source could resolve differently on a later run.
+    data = manifest()
+    if "repository" in replacement or replacement["kind"] == "local-package":
+        data["source"] = replacement
+    else:
+        data["runtime"] = replacement
+    schema = json.loads((ROOT / "schemas/hyperspectrum-tool-v1.schema.json").read_text())
+
+    with pytest.raises(ValidationError, match=message):
+        load_tool_manifest(data)
+    assert not Draft202012Validator(schema).is_valid(data)
+
+
 def test_rejects_git_source_without_commit_or_release() -> None:
     # Break caught: an external adapter could track an unpinned source revision.
     data = manifest()
@@ -88,6 +128,17 @@ def test_rejects_git_source_without_commit_or_release() -> None:
 
     with pytest.raises(ValidationError, match="commit or release"):
         load_tool_manifest(data)
+
+
+def test_schema_and_model_require_digest_for_declared_present_weights() -> None:
+    # Break caught: a claimed present checkpoint could be selected without integrity evidence.
+    data = manifest()
+    data["weights"] = {"required": True, "state": "present", "allow_download": False}
+    schema = json.loads((ROOT / "schemas/hyperspectrum-tool-v1.schema.json").read_text())
+
+    with pytest.raises(ValidationError, match="weight digest"):
+        load_tool_manifest(data)
+    assert not Draft202012Validator(schema).is_valid(data)
 
 
 def test_rejects_unknown_output_role() -> None:
@@ -169,7 +220,10 @@ def test_digest_depends_on_canonical_manifest_semantics_not_yaml_key_order() -> 
 
 def test_match_fails_closed_on_every_required_gate() -> None:
     # Break caught: omitting any one compatibility gate could select an unsafe or unusable tool.
-    registry = ToolRegistry((load_tool_manifest(manifest()),))
+    registry = ToolRegistry(
+        (load_tool_manifest(manifest()),),
+        availability_resolver=lambda _: ToolAvailability(available=True),
+    )
     matching = ToolMatchRequest(
         modality="xas",
         task="denoising",
@@ -194,3 +248,67 @@ def test_match_fails_closed_on_every_required_gate() -> None:
         ),
     ):
         assert registry.match(mismatch) == ()
+
+
+def test_default_match_excludes_tool_with_unresolvable_entrypoint_verify_or_weights() -> None:
+    # Break caught: selection could return a manifest that cannot safely be executed.
+    tool = load_tool_manifest(manifest())
+    registry = ToolRegistry((tool,))
+    request = ToolMatchRequest(
+        modality="xas",
+        task="denoising",
+        input_roles=("raw_signal",),
+        output_roles=("denoised_signal",),
+        license_policy=LicensePolicy.private_validation(),
+        weights_state="required-missing",
+        resources=ResourceBudget(cpu=4, memory_gb=16, gpu_available=False),
+    )
+
+    assert registry.match(request) == ()
+    availability = registry.availability(tool)
+    assert availability.available is False
+    assert {
+        "entrypoint-unresolvable",
+        "verify-module-unresolvable",
+        "weights-required-missing",
+    }.issubset(availability.reasons)
+
+
+def test_injected_availability_resolver_allows_deterministic_executable_match() -> None:
+    # Break caught: tests could depend on importing or executing an external adapter to select it.
+    tool = load_tool_manifest(manifest())
+    registry = ToolRegistry(
+        (tool,), availability_resolver=lambda _: ToolAvailability(available=True)
+    )
+    request = ToolMatchRequest(
+        modality="xas",
+        task="denoising",
+        input_roles=("raw_signal",),
+        output_roles=("denoised_signal",),
+        license_policy=LicensePolicy.private_validation(),
+        weights_state="required-missing",
+        resources=ResourceBudget(cpu=4, memory_gb=16, gpu_available=False),
+    )
+
+    assert registry.match(request) == (tool,)
+
+
+def test_registered_tools_are_discoverable_but_not_default_executable_until_available() -> None:
+    # Break caught: an unavailable registered adapter or baseline could be returned for execution.
+    savgol = load_tool_manifest(ROOT / "tools/xas/savgol/tool.yaml")
+    xasdenoise = load_tool_manifest(ROOT / "tools/xas/xasdenoise/tool.yaml")
+    registry = ToolRegistry((savgol, xasdenoise))
+    request = ToolMatchRequest(
+        modality="xas",
+        task="denoising",
+        input_roles=("raw_signal",),
+        output_roles=("denoised_signal",),
+        license_policy=LicensePolicy.private_validation(),
+        weights_state="not-required",
+        resources=ResourceBudget(cpu=4, memory_gb=16, gpu_available=False),
+    )
+
+    assert registry.tools == (savgol, xasdenoise)
+    assert registry.match(request) == ()
+    assert "entrypoint-unresolvable" in registry.availability(savgol).reasons
+    assert "entrypoint-unresolvable" in registry.availability(xasdenoise).reasons

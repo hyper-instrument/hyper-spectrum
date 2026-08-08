@@ -18,6 +18,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 _IMAGE_DIGEST = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_RELEASE_VERSION = re.compile(
+    r"^v?\d+(?:\.\d+)+(?:[-.]?(?:a|alpha|b|beta|rc|pre|preview|post|dev)\d*(?:\.\d+)*)?(?:\+[0-9A-Za-z.-]+)?$"
+)
+_SHA256_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 ArtifactKind = Literal[
     "dense_array",
@@ -73,6 +77,12 @@ class RuntimeSpec(BaseModel):
             raise ValueError("runtime image must be pinned by an immutable digest")
         return value
 
+    @model_validator(mode="after")
+    def require_image_for_container(self) -> RuntimeSpec:
+        if self.kind == "container" and self.image is None:
+            raise ValueError("container runtime requires an image pinned by an immutable digest")
+        return self
+
 
 class ArtifactSpec(BaseModel):
     """One typed input or output with a role from the documented vocabulary."""
@@ -122,10 +132,18 @@ class SourceSpec(BaseModel):
                 raise ValueError("git source requires exactly one commit or release")
             if self.commit is not None and _GIT_COMMIT.fullmatch(self.commit) is None:
                 raise ValueError("source commit must be a 40-character lowercase Git commit")
+            if self.release is not None and _RELEASE_VERSION.fullmatch(self.release) is None:
+                raise ValueError("source release must be an immutable release version")
             return self
 
         if not self.package or not self.version or not self.revision:
             raise ValueError("local-package source requires package, version, and revision")
+        if _RELEASE_VERSION.fullmatch(self.version) is None:
+            raise ValueError("local-package source version must be an immutable release version")
+        if _GIT_COMMIT.fullmatch(self.revision) is None and _RELEASE_VERSION.fullmatch(
+            self.revision
+        ) is None:
+            raise ValueError("local-package source revision must be an immutable revision")
         return self
 
 
@@ -137,6 +155,14 @@ class WeightsSpec(BaseModel):
     required: bool
     state: WeightsState
     allow_download: Literal[False]
+    digest: str | None = None
+
+    @field_validator("digest")
+    @classmethod
+    def require_sha256_weight_digest(cls, value: str | None) -> str | None:
+        if value is not None and _SHA256_DIGEST.fullmatch(value) is None:
+            raise ValueError("weight digest must be a 64-character lowercase SHA-256")
+        return value
 
     @model_validator(mode="after")
     def require_consistent_weight_state(self) -> WeightsSpec:
@@ -144,6 +170,10 @@ class WeightsSpec(BaseModel):
             raise ValueError("required weights cannot have state not-required")
         if not self.required and self.state != "not-required":
             raise ValueError("optional weights must have state not-required")
+        if self.state == "present" and self.digest is None:
+            raise ValueError("present weights require a weight digest")
+        if self.state != "present" and self.digest is not None:
+            raise ValueError("only present weights may declare a weight digest")
         return self
 
 
@@ -274,3 +304,29 @@ class ToolMatchRequest(BaseModel):
         if len(roles) != len(set(roles)):
             raise ValueError("match request artifact roles must be unique")
         return roles
+
+
+AvailabilityReason = Literal[
+    "entrypoint-unresolvable",
+    "verify-command-unresolvable",
+    "verify-module-unresolvable",
+    "weights-required-missing",
+    "weights-unverified",
+]
+
+
+class ToolAvailability(BaseModel):
+    """Safe, machine-readable executable availability determined by a resolver."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    available: bool
+    reasons: tuple[AvailabilityReason, ...] = ()
+
+    @model_validator(mode="after")
+    def require_consistent_availability(self) -> ToolAvailability:
+        if self.available and self.reasons:
+            raise ValueError("available tools cannot have unavailability reasons")
+        if not self.available and not self.reasons:
+            raise ValueError("unavailable tools require machine-readable reasons")
+        return self
