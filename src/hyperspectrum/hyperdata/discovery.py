@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Protocol, cast
 
 from hyperspectrum.contracts.json import freeze_json_mapping
@@ -25,21 +25,21 @@ def discover_xas(gateway: SearchGateway) -> tuple[DatasetCandidate, ...]:
     function deliberately reads catalog fields and small header evidence only;
     it never opens dataset files or archive members.
     """
-    records: dict[str, Mapping[str, object]] = {}
-    source_queries: dict[str, list[str]] = {}
+    observations: dict[str, list[tuple[str, Mapping[str, object]]]] = {}
     for query in XAS_QUERIES:
         for record in _records_from_result(gateway.search(query)):
             dataset_code = _optional_string(record.get("dataset_code"))
             if dataset_code is None:
                 continue
-            records.setdefault(dataset_code, record)
-            source_queries.setdefault(dataset_code, []).append(query)
+            observations.setdefault(dataset_code, []).append((query, record))
 
     candidates = tuple(
-        _candidate_from_record(record, tuple(source_queries[dataset_code]))
-        for dataset_code, record in records.items()
+        _candidate_from_observations(dataset_code, candidate_observations)
+        for dataset_code, candidate_observations in observations.items()
     )
-    return tuple(sorted(candidates, key=lambda candidate: (-_score(candidate), candidate.dataset_code)))
+    # Python's stable sort preserves first observed search order for exact
+    # evidence ties. Dataset metadata is intentionally not a tie-breaker.
+    return tuple(sorted(candidates, key=lambda candidate: -_score(candidate)))
 
 
 def _records_from_result(result: HydCommandResult) -> tuple[Mapping[str, object], ...]:
@@ -53,48 +53,160 @@ def _records_from_result(result: HydCommandResult) -> tuple[Mapping[str, object]
     return tuple(cast(Mapping[str, object], record) for record in records if isinstance(record, Mapping))
 
 
-def _candidate_from_record(
-    record: Mapping[str, object], source_queries: tuple[str, ...]
+def _candidate_from_observations(
+    dataset_code: str, observations: Sequence[tuple[str, Mapping[str, object]]]
 ) -> DatasetCandidate:
-    """Select safe catalog/header fields and retain their provenance as evidence."""
-    parser_status = _object(record.get("parser_status"))
-    axis_evidence = _normalise_axis_evidence(
-        _object(record.get("axis_evidence")), _optional_string(parser_status.get("kind"))
+    """Aggregate duplicate catalog/header observations without suppressing conflicts."""
+    observed = tuple(_observation_evidence(query, record) for query, record in observations)
+    parser_status = _aggregate_parser_status(observed)
+    axis_evidence = _aggregate_axis_evidence(observed)
+    label_evidence = _aggregate_role_evidence(observed, "label_evidence", "ground_truth_roles")
+    pairing_evidence = _aggregate_role_evidence(observed, "pairing_evidence", "roles")
+    roles = _sorted_unique_strings(
+        role
+        for observation in observed
+        for role in cast(tuple[str, ...], observation["ground_truth_roles"])
     )
-    label_evidence = _object(record.get("label_evidence"))
-    pairing_evidence = _object(record.get("pairing_evidence"))
-    roles = _string_tuple(label_evidence.get("ground_truth_roles"))
     readiness_score = _readiness_score(
         parser_status=parser_status,
         axis_evidence=axis_evidence,
         label_evidence=label_evidence,
         pairing_evidence=pairing_evidence,
     )
-    license_name = _optional_string(record.get("license"))
+    licenses = _sorted_unique_strings(
+        license_name
+        for observation in observed
+        if (license_name := _optional_string(observation["license"])) is not None
+    )
+    license_name = licenses[0] if len(licenses) == 1 else None
+    source_queries = _ordered_unique_strings(
+        cast(str, observation["source_query"]) for observation in observed
+    )
     evidence: dict[str, object] = {
         "source_queries": source_queries,
-        "source_kind": _optional_string(record.get("source_kind")) or "unknown",
-        "access_status": _optional_string(record.get("access_status")) or "unknown",
+        "source_kind": _aggregate_state(observed, "source_kind"),
+        "source_kinds": _sorted_unique_strings(
+            cast(str, observation["source_kind"]) for observation in observed
+        ),
+        "access_status": _aggregate_state(observed, "access_status"),
+        "access_statuses": _sorted_unique_strings(
+            cast(str, observation["access_status"]) for observation in observed
+        ),
         "parser_status": parser_status,
         "axis_evidence": axis_evidence,
         "label_evidence": label_evidence,
         "pairing_evidence": pairing_evidence,
         "ground_truth_roles": roles,
         "license": license_name,
+        "license_observations": licenses,
+        "observations": observed,
         "readiness_score": readiness_score,
     }
     return DatasetCandidate(
-        dataset_code=_required_string(record.get("dataset_code"), "dataset_code"),
-        dataset_version=_optional_string(record.get("dataset_version")),
-        content_digest=_optional_string(record.get("content_digest")),
-        title=_optional_string(record.get("title")) or "",
-        description=_optional_string(record.get("description")) or "",
-        file_count=_nonnegative_int(record.get("file_count")),
-        parsed_file_count=_nonnegative_int(record.get("parsed_file_count")),
-        formats=_string_tuple(record.get("formats")),
+        dataset_code=dataset_code,
+        dataset_version=_uniform_optional_string(observed, "dataset_version"),
+        content_digest=_uniform_optional_string(observed, "content_digest"),
+        title=_canonical_string(observed, "title"),
+        description=_canonical_string(observed, "description"),
+        file_count=max(cast(int, observation["file_count"]) for observation in observed),
+        parsed_file_count=min(
+            cast(int, observation["parsed_file_count"]) for observation in observed
+        ),
+        formats=_sorted_unique_strings(
+            file_format
+            for observation in observed
+            for file_format in cast(tuple[str, ...], observation["formats"])
+        ),
         license=license_name,
         evidence=freeze_json_mapping(evidence),
     )
+
+
+def _observation_evidence(query: str, record: Mapping[str, object]) -> dict[str, object]:
+    """Keep selected public evidence from one result without retaining raw payloads."""
+    parser_status = _object(record.get("parser_status"))
+    return {
+        "source_query": query,
+        "source_kind": _optional_string(record.get("source_kind")) or "unknown",
+        "access_status": _optional_string(record.get("access_status")) or "unknown",
+        "parser_status": parser_status,
+        "axis_evidence": _normalise_axis_evidence(
+            _object(record.get("axis_evidence")), _optional_string(parser_status.get("kind"))
+        ),
+        "label_evidence": _object(record.get("label_evidence")),
+        "pairing_evidence": _object(record.get("pairing_evidence")),
+        "ground_truth_roles": _string_tuple(
+            _object(record.get("label_evidence")).get("ground_truth_roles")
+        ),
+        "license": _optional_string(record.get("license")),
+        "formats": _string_tuple(record.get("formats")),
+        "dataset_version": _optional_string(record.get("dataset_version")),
+        "content_digest": _optional_string(record.get("content_digest")),
+        "title": _optional_string(record.get("title")) or "",
+        "description": _optional_string(record.get("description")) or "",
+        "file_count": _nonnegative_int(record.get("file_count")),
+        "parsed_file_count": _nonnegative_int(record.get("parsed_file_count")),
+    }
+
+
+def _aggregate_parser_status(observations: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    statuses = tuple(cast(Mapping[str, object], observation["parser_status"]) for observation in observations)
+    kinds = _sorted_unique_strings(
+        _optional_string(status.get("kind")) or "unknown" for status in statuses
+    )
+    misparsed = any((_optional_string(status.get("kind")) == "esri_grid_misparse") for status in statuses)
+    return {
+        "kind": kinds[0] if len(kinds) == 1 else "mixed",
+        "valid": bool(statuses) and all(_truth(status.get("valid")) for status in statuses) and not misparsed,
+        "misparsed": misparsed,
+        "observed_kinds": kinds,
+    }
+
+
+def _aggregate_axis_evidence(observations: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    axes = tuple(
+        _object(cast(Mapping[str, object], observation["axis_evidence"]).get("energy_axis"))
+        for observation in observations
+    )
+    units = _sorted_unique_strings(
+        unit for axis in axes if (unit := _optional_string(axis.get("unit"))) is not None
+    )
+    return {
+        "energy_axis": {
+            "valid": bool(axes) and all(_truth(axis.get("valid")) for axis in axes),
+            "unit": units[0] if len(units) == 1 else None,
+            "observed_units": units,
+        }
+    }
+
+
+def _aggregate_role_evidence(
+    observations: Sequence[Mapping[str, object]], evidence_key: str, roles_key: str
+) -> dict[str, object]:
+    evidence = tuple(
+        cast(Mapping[str, object], observation[evidence_key]) for observation in observations
+    )
+    return {
+        "verified": any(_truth(item.get("verified")) for item in evidence),
+        roles_key: _sorted_unique_strings(
+            role for item in evidence for role in _string_tuple(item.get(roles_key))
+        ),
+    }
+
+
+def _aggregate_state(observations: Sequence[Mapping[str, object]], key: str) -> str:
+    values = _sorted_unique_strings(cast(str, observation[key]) for observation in observations)
+    return values[0] if len(values) == 1 else "mixed"
+
+
+def _uniform_optional_string(observations: Sequence[Mapping[str, object]], key: str) -> str | None:
+    values = {_optional_string(observation[key]) for observation in observations}
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def _canonical_string(observations: Sequence[Mapping[str, object]], key: str) -> str:
+    values = _sorted_unique_strings(cast(str, observation[key]) for observation in observations)
+    return values[0] if values else ""
 
 
 def _score(candidate: DatasetCandidate) -> int:
@@ -123,7 +235,7 @@ def _readiness_score(
         score += 20
 
     parser_kind = _optional_string(parser_status.get("kind")) or ""
-    if parser_kind == "esri_grid_misparse":
+    if _truth(parser_status.get("misparsed")) or parser_kind == "esri_grid_misparse":
         score -= 20
     elif _truth(parser_status.get("valid")) and parser_kind == "spectroscopy":
         score += 10
@@ -168,6 +280,23 @@ def _string_tuple(value: object) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return ()
     return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+
+
+def _ordered_unique_strings(values: Iterable[object]) -> tuple[str, ...]:
+    """Return the first observed spelling of each non-blank string."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        normalised = _optional_string(value)
+        if normalised is not None and normalised not in seen:
+            seen.add(normalised)
+            ordered.append(normalised)
+    return tuple(ordered)
+
+
+def _sorted_unique_strings(values: Iterable[object]) -> tuple[str, ...]:
+    """Return canonical evidence values independently of discovery query order."""
+    return tuple(sorted(set(_ordered_unique_strings(values))))
 
 
 def _nonnegative_int(value: object) -> int:

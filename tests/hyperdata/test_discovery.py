@@ -111,6 +111,104 @@ def test_discovery_ranks_explicit_evidence_above_xas_words_in_a_title() -> None:
     assert candidates[0].evidence["readiness_score"] > candidates[1].evidence["readiness_score"]
 
 
+def test_equal_evidence_keeps_the_documented_search_observation_order() -> None:
+    """Catches using a dataset code or title as an undocumented score tiebreaker."""
+    observation = {
+        "dataset_version": None,
+        "content_digest": None,
+        "title": "Same evidence",
+        "description": "",
+        "file_count": 1,
+        "parsed_file_count": 0,
+        "formats": ["DAT"],
+        "license": None,
+        "parser_status": {"kind": "generic_text", "valid": False},
+        "axis_evidence": {"energy_axis": {"valid": False, "unit": None}},
+        "label_evidence": {"verified": False, "ground_truth_roles": []},
+        "pairing_evidence": {"verified": False, "roles": []},
+        "access_status": "admitted_catalog",
+        "source_kind": "volcano_catalog",
+    }
+    gateway = FixtureGateway(
+        {
+            "XAS": [
+                {**observation, "dataset_code": "z-seen-first"},
+                {**observation, "dataset_code": "a-would-sort-first"},
+            ]
+        }
+    )
+
+    candidates = discover_xas(gateway)
+
+    assert [candidate.dataset_code for candidate in candidates] == [
+        "z-seen-first",
+        "a-would-sort-first",
+    ]
+
+
+def test_duplicate_hits_merge_all_evidence_and_keep_misparse_conservative() -> None:
+    """Catches query-order loss of duplicate parser, axis, role, or access evidence."""
+    first_duplicate_hit = {
+        "dataset_code": "duplicate",
+        "dataset_version": None,
+        "content_digest": None,
+        "title": "Duplicate first observation",
+        "description": "",
+        "file_count": 2,
+        "parsed_file_count": 2,
+        "formats": ["DAT"],
+        "license": "CC-BY-4.0",
+        "parser_status": {"kind": "spectroscopy", "valid": True},
+        "axis_evidence": {"energy_axis": {"valid": True, "unit": "eV"}},
+        "label_evidence": {"verified": True, "ground_truth_roles": ["oxidation_state"]},
+        "pairing_evidence": {"verified": True, "roles": ["structure"]},
+        "access_status": "admitted_catalog",
+        "source_kind": "volcano_catalog",
+    }
+    conflicting_duplicate_hit = {
+        **first_duplicate_hit,
+        "title": "Duplicate conflicting observation",
+        "formats": ["NXS"],
+        "license": "CC0-1.0",
+        "parser_status": {"kind": "esri_grid_misparse", "valid": False},
+        "axis_evidence": {"energy_axis": {"valid": True, "unit": "eV"}},
+        "label_evidence": {"verified": False, "ground_truth_roles": ["coordination_motif"]},
+        "pairing_evidence": {"verified": True, "roles": ["spectrum"]},
+        "access_status": "external_discovery_proposal",
+        "source_kind": "external_discovery",
+    }
+    clean_comparator = {
+        **first_duplicate_hit,
+        "dataset_code": "clean-comparator",
+    }
+    gateway = FixtureGateway(
+        {
+            "XAS": [first_duplicate_hit, clean_comparator],
+            "XANES": [conflicting_duplicate_hit],
+        }
+    )
+
+    candidates = discover_xas(gateway)
+    by_code = {candidate.dataset_code: candidate for candidate in candidates}
+    duplicate = by_code["duplicate"]
+
+    assert duplicate.formats == ("DAT", "NXS")
+    assert duplicate.license is None
+    assert duplicate.evidence["source_queries"] == ("XAS", "XANES")
+    assert duplicate.evidence["ground_truth_roles"] == (
+        "coordination_motif",
+        "oxidation_state",
+    )
+    assert duplicate.evidence["parser_status"]["misparsed"] is True  # type: ignore[index]
+    assert duplicate.evidence["axis_evidence"]["energy_axis"]["valid"] is False  # type: ignore[index]
+    assert duplicate.evidence["license_observations"] == ("CC-BY-4.0", "CC0-1.0")
+    assert [observation["source_query"] for observation in duplicate.evidence["observations"]] == [  # type: ignore[index]
+        "XAS",
+        "XANES",
+    ]
+    assert duplicate.evidence["readiness_score"] < by_code["clean-comparator"].evidence["readiness_score"]
+
+
 def test_esri_misparsed_asc_never_becomes_a_valid_energy_axis() -> None:
     """Catches treating generic ASC parser output as XAS energy-axis evidence."""
     clean = {
