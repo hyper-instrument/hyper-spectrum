@@ -12,6 +12,7 @@ import pytest
 
 from hyperspectrum import agent
 from hyperspectrum.hyperdata.models import DatasetCandidate
+from hyperspectrum.process_boundary import redact_text
 
 ROOT = Path(__file__).resolve().parents[2]
 SECRET_LITERALS = (
@@ -182,3 +183,101 @@ def test_real_json_parse_error_redacts_invalid_option_value() -> None:
 
     assert_one_error_envelope(completed)
     assert "PARSE_SECRET_LITERAL" not in completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "secrets", "safe_context"),
+    [
+        (
+            (
+                '{"clientSecret":"QUOTED_CAMEL_LITERAL",'
+                '"nested":{"refresh_token":"NESTED_OAUTH_LITERAL"},'
+                '"authorization":"Bearer QUOTED_BEARER_LITERAL",'
+                '"context":"keep-json"}'
+            ),
+            (
+                "QUOTED_CAMEL_LITERAL",
+                "NESTED_OAUTH_LITERAL",
+                "QUOTED_BEARER_LITERAL",
+            ),
+            "keep-json",
+        ),
+        (
+            (
+                '{"message":"{\\"accessToken\\":'
+                '\\"ESCAPED_JSON_LITERAL\\"}",'
+                '"context":"keep-escaped"}'
+            ),
+            ("ESCAPED_JSON_LITERAL",),
+            "keep-escaped",
+        ),
+        (
+            (
+                "{'client_secret': 'PY_REPR_LITERAL', "
+                "'nested': {'accessToken': 'ESCAPED_LITERAL'}, "
+                "'context': 'keep-repr'}"
+            ),
+            ("PY_REPR_LITERAL", "ESCAPED_LITERAL"),
+            "keep-repr",
+        ),
+        (
+            (
+                "failure keep-url "
+                "https://USERINFO_TOKEN_LITERAL@example.invalid/data "
+                "https://safe-user:USERINFO_PASSWORD_LITERAL@example.invalid/data "
+                "https://example.invalid/?client_secret=QUERY_OAUTH_LITERAL"
+            ),
+            (
+                "USERINFO_TOKEN_LITERAL",
+                "USERINFO_PASSWORD_LITERAL",
+                "QUERY_OAUTH_LITERAL",
+            ),
+            "keep-url",
+        ),
+        (
+            'malformed keep-malformed {"clientSecret":"MALFORMED_LITERAL"',
+            ("MALFORMED_LITERAL",),
+            "keep-malformed",
+        ),
+        (
+            (
+                'corrupted keep-nested {"authorization":"Bearer [REDACTED],'
+                '"nested":{"refresh_token":"CORRUPTED_NESTED_LITERAL"}}'
+            ),
+            ("CORRUPTED_NESTED_LITERAL",),
+            "keep-nested",
+        ),
+    ],
+)
+def test_text_redactor_handles_quoted_nested_and_malformed_diagnostics(
+    diagnostic: str, secrets: tuple[str, ...], safe_context: str
+) -> None:
+    rendered = redact_text(diagnostic)
+
+    assert all(secret not in rendered for secret in secrets)
+    assert safe_context in rendered
+
+
+def test_service_exception_redacts_quoted_diagnostic_and_result() -> None:
+    error = agent.AgentExecutionError(
+        ('{"clientSecret":"EXCEPTION_MESSAGE_LITERAL","context":"keep-exception"}'),
+        result={
+            "client_secret": "EXCEPTION_RESULT_LITERAL",
+            "context": "keep-result",
+        },
+    )
+    rendered = f"{error} {json.dumps(error.result)}"
+
+    assert "EXCEPTION_MESSAGE_LITERAL" not in rendered
+    assert "EXCEPTION_RESULT_LITERAL" not in rendered
+    assert "keep-exception" in rendered
+    assert "keep-result" in rendered
+
+
+def test_text_redactor_does_not_raise_on_deeply_malformed_diagnostic() -> None:
+    diagnostic = "keep-deep " + "[" * 2_000 + '{"clientSecret":"DEEP_LITERAL"'
+
+    rendered = redact_text(diagnostic)
+
+    assert "DEEP_LITERAL" not in rendered
+    assert "keep-deep" in rendered

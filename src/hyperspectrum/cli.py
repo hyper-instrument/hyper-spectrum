@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Callable
+from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from typing import Annotated, Any
@@ -176,10 +177,21 @@ def main() -> None:
     """Run Typer behind a JSON-aware boundary that includes parse failures."""
 
     json_output = "--json" in sys.argv[1:]
+    json_help = json_output and "--help" in sys.argv[1:]
     try:
-        exit_code = app(standalone_mode=False)
+        if json_help:
+            rendered_help = StringIO()
+            with redirect_stdout(rendered_help):
+                exit_code = app(standalone_mode=False)
+        else:
+            exit_code = app(standalone_mode=False)
         if isinstance(exit_code, int) and exit_code:
             raise SystemExit(exit_code)
+        if json_help:
+            _emit_envelope(
+                ok=True,
+                result={"help": rendered_help.getvalue()},
+            )
     except ClickException as error:
         rendered_error = StringIO()
         error.show(file=rendered_error)

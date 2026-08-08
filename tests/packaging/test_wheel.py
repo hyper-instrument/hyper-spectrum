@@ -530,3 +530,104 @@ def test_installed_discovery_missing_client_is_exit_four(
     )
 
     assert_error_envelope(completed, 4, "missing_asset_or_tool")
+
+
+def test_installed_generic_failure_redacts_quoted_diagnostics(
+    installed_console: tuple[Path, dict[str, str], Path],
+) -> None:
+    console, environment, root = installed_console
+    hyd = root / "bin/hyd"
+    hyd.write_text(
+        (
+            "#!/bin/sh\n"
+            "printf '%s\\n' "
+            '\'{"clientSecret":"INSTALLED_QUOTED_CAMEL",'
+            '"nested":{"refresh_token":"INSTALLED_NESTED_OAUTH"},'
+            '"authorization":"Bearer INSTALLED_QUOTED_BEARER",'
+            '"context":"keep-installed-json"}\' >&2\n'
+            "printf '%s\\n' "
+            "\"{'client_secret': 'INSTALLED_PY_REPR', "
+            "'accessToken': 'INSTALLED_ESCAPED', "
+            "'context': 'keep-installed-repr'}\" >&2\n"
+            "printf '%s\\n' "
+            "'https://INSTALLED_USERINFO@example.invalid/data?"
+            "client_secret=INSTALLED_QUERY_OAUTH' >&2\n"
+            "printf '%s\\n' "
+            '\'malformed {"clientSecret":"INSTALLED_MALFORMED"\' >&2\n'
+            "exit 1\n"
+        ),
+        encoding="utf-8",
+    )
+    hyd.chmod(0o755)
+    isolated_environment = dict(environment)
+    isolated_environment["PATH"] = str(root / "bin")
+
+    completed = command(
+        str(console),
+        "data",
+        "discover",
+        "--modality",
+        "xas",
+        "--profile",
+        "volcano",
+        "--json",
+        env=isolated_environment,
+    )
+
+    envelope = assert_error_envelope(completed, 5, "execution_failure")
+    rendered = completed.stdout + completed.stderr
+    secrets = (
+        "INSTALLED_QUOTED_CAMEL",
+        "INSTALLED_NESTED_OAUTH",
+        "INSTALLED_QUOTED_BEARER",
+        "INSTALLED_PY_REPR",
+        "INSTALLED_ESCAPED",
+        "INSTALLED_USERINFO",
+        "INSTALLED_QUERY_OAUTH",
+        "INSTALLED_MALFORMED",
+    )
+    leaked = [secret for secret in secrets if secret in rendered]
+    assert leaked == [], rendered
+    for safe_context in ("keep-installed-json", "keep-installed-repr"):
+        assert safe_context in completed.stdout
+        assert safe_context in completed.stderr
+        assert safe_context in envelope["error"]["message"]  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "command_path",
+    [
+        ("doctor",),
+        ("data", "discover"),
+        ("task", "recommend"),
+        ("tools", "match"),
+        ("run", "plan"),
+        ("run", "local"),
+    ],
+)
+@pytest.mark.parametrize("agent_options", [("--json", "--help"), ("--help", "--json")])
+def test_installed_json_help_is_one_success_envelope(
+    installed_console: tuple[Path, dict[str, str], Path],
+    command_path: tuple[str, ...],
+    agent_options: tuple[str, ...],
+) -> None:
+    console, environment, _ = installed_console
+
+    completed = command(str(console), *command_path, *agent_options, env=environment)
+
+    envelope = assert_success_envelope(completed)
+    assert completed.stderr == ""
+    assert isinstance(envelope["result"], dict)
+    assert "Usage:" in envelope["result"]["help"]  # type: ignore[index]
+
+
+def test_installed_non_json_help_remains_human_readable(
+    installed_console: tuple[Path, dict[str, str], Path],
+) -> None:
+    console, environment, _ = installed_console
+
+    completed = command(str(console), "doctor", "--help", env=environment)
+
+    assert completed.returncode == 0
+    assert completed.stdout.count("\n") > 1
+    assert "Usage:" in completed.stdout

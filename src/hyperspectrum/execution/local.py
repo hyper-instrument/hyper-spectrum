@@ -278,6 +278,8 @@ def _load_inference_source(
             raise ValueError(f"source NPZ {name} must not use a structured dtype")
         if array.dtype.kind not in "fiu":
             raise ValueError(f"source NPZ {name} must be a real numeric array")
+    energy = _canonical_float64(energy, name="energy")
+    noisy = _canonical_float64(noisy, name="noisy")
     for name, array in (
         ("sample_ids", sample_id_values),
         ("group_ids", group_id_values),
@@ -308,8 +310,6 @@ def _load_inference_source(
         or any(not value.strip() for value in group_ids)
         or len(sample_ids) != len(set(sample_ids))
         or energy_unit != "eV"
-        or not np.isfinite(energy).all()
-        or not np.isfinite(noisy).all()
     )
     if malformed:
         raise ValueError("source NPZ contains malformed noisy-input arrays")
@@ -333,6 +333,21 @@ def _load_inference_source(
         group_ids=group_ids,
         energy_unit=energy_unit,
     )
+
+
+def _canonical_float64(array: Any, *, name: str) -> Any:
+    """Detach real numeric input as float64 without overflow or precision loss."""
+
+    canonical = np.array(array, dtype=np.float64, copy=True)
+    if not np.isfinite(canonical).all():
+        raise ValueError(f"source NPZ {name} must contain only finite values")
+    if array.dtype.kind in "iu":
+        exact = np.equal(array.astype(object), canonical.astype(object)).all()
+    else:
+        exact = np.array_equal(array, canonical.astype(array.dtype))
+    if not exact:
+        raise ValueError(f"source NPZ {name} cannot be represented exactly as float64")
+    return canonical
 
 
 def _savgol_parameters(plan: RunPlan) -> tuple[int, int]:

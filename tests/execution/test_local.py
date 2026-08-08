@@ -473,6 +473,133 @@ def test_structured_noisy_array_is_rejected_before_tool_loading(
     assert not run_plan.output_directory.exists()
 
 
+@pytest.mark.parametrize(
+    "energy",
+    [
+        np.array([[2, 1, 2, 3, 4, 5, 6, 7, 8]], dtype=np.uint64),
+        np.array(
+            [[0, 1, 2, 3, 4, 5, 6, 7, np.iinfo(np.uint64).max]],
+            dtype=np.uint64,
+        ),
+        np.array(
+            [
+                [
+                    2**53,
+                    2**53 + 1,
+                    2**53 + 2,
+                    2**53 + 3,
+                    2**53 + 4,
+                    2**53 + 5,
+                    2**53 + 6,
+                    2**53 + 7,
+                    2**53 + 8,
+                ]
+            ],
+            dtype=np.int64,
+        ),
+        np.array([[False, True, True, True, True, True, True, True, True]]),
+        np.array([[1.0, 2.0, 3.0, 4.0, np.nan, 6.0, 7.0, 8.0, 9.0]]),
+        np.array([[1.0, 2.0, 3.0, 4.0, np.inf, 6.0, 7.0, 8.0, 9.0]]),
+        np.array([[1, 2, 3, 4, 5, 6, 7, 8, 9]], dtype=object),
+        np.zeros((1, 9), dtype=[("energy", np.float64), ("target", np.float64)]),
+        np.array(
+            [[1 + 0j, 2 + 0j, 3 + 0j, 4 + 0j, 5 + 0j, 6 + 0j, 7 + 0j, 8 + 0j, 9 + 0j]]
+        ),
+    ],
+    ids=[
+        "uint64-nonmonotonic-underflow",
+        "uint64-extreme-overflow",
+        "int64-inexact-float64",
+        "bool",
+        "nan",
+        "infinity",
+        "object",
+        "structured",
+        "complex",
+    ],
+)
+def test_unsafe_energy_is_rejected_before_entrypoint_or_tool_loading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, energy: np.ndarray
+) -> None:
+    source = tmp_path / "unsafe-energy.npz"
+    with np.load(FIXTURE, allow_pickle=False) as data:
+        np.savez(
+            source,
+            energy=energy,
+            noisy=data["noisy"][:1],
+            sample_ids=data["sample_ids"][:1],
+            group_ids=data["group_ids"][:1],
+            energy_unit=data["energy_unit"],
+        )
+    run_plan = plan(
+        tmp_path,
+        dataset=dataset_for_source(source),
+        verdict=verdict_for_source(source),
+    )
+
+    def forbidden_boundary(*args: object, **kwargs: object) -> object:
+        raise AssertionError("entrypoint or tool loading must not run")
+
+    monkeypatch.setattr(local, "_verify_savgol_identity", forbidden_boundary)
+    monkeypatch.setattr(local, "_load_savgol_callable", forbidden_boundary)
+
+    with pytest.raises((TypeError, ValueError)):
+        execute_local_run(
+            run_plan,
+            tool=savgol(),
+            selected_sample_ids=fixture_ids(1),
+            source_npz=source,
+        )
+
+    assert not run_plan.output_directory.exists()
+
+
+@pytest.mark.parametrize(
+    "energy",
+    [
+        np.arange(1, 10, dtype=np.uint32)[None, :],
+        np.arange(9, 0, -1, dtype=np.int32)[None, :],
+        np.arange(2**53, 2**53 + 18, 2, dtype=np.int64)[None, :],
+    ],
+    ids=[
+        "increasing-uint32",
+        "decreasing-int32",
+        "exact-int64-above-two-to-the-53",
+    ],
+)
+def test_exact_integer_energy_axes_execute_after_float64_canonicalization(
+    tmp_path: Path, energy: np.ndarray
+) -> None:
+    source = tmp_path / "integer-energy.npz"
+    with np.load(FIXTURE, allow_pickle=False) as data:
+        np.savez(
+            source,
+            energy=energy,
+            noisy=data["noisy"][:1],
+            sample_ids=data["sample_ids"][:1],
+            group_ids=data["group_ids"][:1],
+            energy_unit=data["energy_unit"],
+        )
+    run_plan = plan(
+        tmp_path,
+        dataset=dataset_for_source(source),
+        verdict=verdict_for_source(source),
+    )
+
+    bundle = execute_local_run(
+        run_plan,
+        tool=savgol(),
+        selected_sample_ids=fixture_ids(1),
+        source_npz=source,
+    )
+
+    assert len(bundle.predictions) == 1
+    prediction = run_plan.output_directory / bundle.predictions[0].uri
+    with np.load(prediction, allow_pickle=False) as output:
+        assert output["energy"].dtype == np.dtype(np.float64)
+        assert np.array_equal(output["energy"], energy.astype(np.float64)[0])
+
+
 def test_executor_rejects_a_changed_implementation_digest(tmp_path: Path) -> None:
     # Break caught: source-code changes after planning could execute under stale model provenance.
     source, valid_plan = inference_plan(tmp_path)
