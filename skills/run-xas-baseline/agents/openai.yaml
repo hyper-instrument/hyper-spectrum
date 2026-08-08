@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run XAS Baseline"
+  short_description: "Plan and run a guarded XAS baseline"
+  default_prompt: "Use $run-xas-baseline to plan a safe XAS denoising baseline run."

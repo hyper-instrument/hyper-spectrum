@@ -1,0 +1,4 @@
+interface:
+  display_name: "Discover XAS Dataset"
+  short_description: "Find evidence-backed XAS dataset candidates"
+  default_prompt: "Use $discover-xas-dataset to find an XAS dataset with machine-readable evidence."
