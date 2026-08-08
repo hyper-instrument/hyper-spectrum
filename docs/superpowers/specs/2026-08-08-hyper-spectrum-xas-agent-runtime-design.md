@@ -87,10 +87,12 @@ modality facet，还必须联合标题/摘要语义、XAS/XANES/EXAFS 术语、�
 
 ### 3.4 ACE 与 Bohr
 
-ACE Benchmark 已提供 research match/import/build/run/report/runs、研究镜像薄
-adapter、本地 Docker 与 Bohr Job 后端。Bohr 不支持本地 bind mount，因此 adapter、
-数据和权重必须暂存上传；外部镜像可在运行时注入 adapter。Bohr 提交使用镜像 tag，
-但结果必须记录本地解析到的镜像 digest、adapter digest、数据摘要和权重摘要。
+ACE Benchmark 已提供 research match/import/build/run/report/runs、`ExecutionSpec`、研究
+镜像薄 adapter、本地 Docker 与 Bohr Job 后端。ACE 独占外层后端选择、暂存、指标摄取
+和报告；HyperSpectrum `RunPlan` 在两类容器内部都保持 local。Bohr 不支持本地 bind
+mount，因此 ACE 必须暂存 adapter、数据和权重；外部镜像可在运行时注入 adapter。
+Bohr 提交使用镜像 tag，但结果必须分别记录本地解析到的镜像 digest、ACE adapter
+digest、HyperSpectrum 实现摘要、数据摘要和权重摘要。
 
 ## 4. 总体架构
 
@@ -98,12 +100,14 @@ adapter、本地 Docker 与 Bohr Job 后端。Bohr 不支持本地 bind mount，
 flowchart LR
     U["用户自然语言目标"] --> A["谱学 Agent / Skills"]
     A --> H["HyperData：数据、标签、版本与检索"]
-    A --> S["HyperSpectrum：任务、工具、模型与适配"]
-    S --> L["本地 CPU/GPU 或 5090"]
-    S --> B["Bohr Job"]
-    L --> P["PredictionBundle"]
-    B --> P
-    P --> E["ACE：指标、报告、榜单"]
+    A --> E["ACE：ExecutionSpec、后端、暂存、指标与报告"]
+    H --> E
+    E --> L["Local Docker"]
+    E --> B["Bohr Job"]
+    L --> S["HyperSpectrum：容器内 local RunPlan"]
+    B --> S
+    S --> P["PredictionBundle"]
+    P --> E
     E --> A
 ```
 
@@ -224,8 +228,9 @@ probe/verify 通过；输入输出与 TaskSpec 匹配；资源需求可满足；
    acquisition 分组生成确定性 split，禁止相邻扫描或同一样品跨 split。
 5. **发现工具。** 匹配传统基线、Larch 下游工具和固定权重模型，检查工具许可、权重
    摘要、支持域及可执行状态。
-6. **生成计划。** 根据数据位置、镜像、GPU、队列和用户策略选择本地/5090 或 Bohr，
-   先输出 dry-run 计划和不可逆操作。
+6. **生成计划。** ACE 根据数据位置、镜像、GPU、队列和用户策略配置外层 Local Docker
+   或 Bohr `ExecutionSpec`，先输出 dry-run 计划和不可逆操作；HyperSpectrum 只生成容器
+   内 local `RunPlan`。
 7. **执行与回收。** HyperData 固定数据版本，HyperSpectrum adapter 生成预测，ACE
    计算指标并回收日志、图表和失败样品。
 8. **解释结果。** Agent 同时解释谱值指标和下游化学指标，不能把 RMSE 改善直接表述
@@ -250,7 +255,8 @@ probe/verify 通过；输入输出与 TaskSpec 匹配；资源需求可满足；
 `zenodo-17434349`；若在线画像证明另一个数据集标签和分组更可靠，Agent 可自动推荐
 替换，但需要把选择理由写入 TaskSpec。
 
-首批比较对象：
+首批比较对象（M1 中每个传统/概率算法都是独立 ACE `ResearchModel` 和独立薄
+adapter，不是单一 adapter 下的运行时 variant）：
 
 | 类别 | 变体 | 训练策略 |
 | --- | --- | --- |
@@ -278,25 +284,48 @@ LCF weight MAE 只在存在已知混合比例或可靠组分标签的数据上�
 
 ## 9. 本地与 Bohr 执行
 
-HyperSpectrum 对 ACE 暴露一个薄 adapter：
+每个 ACE `ResearchModel` 通过自己的模型目录暴露一个薄 adapter；冻结合同不会把
+`variantId` 传给 `run.py`，也只暂存并计算 `common/entry.py` 与该模型 `run.py` 的
+adapter digest。因此 M1 不得让一个 adapter 依赖同级 `tool-manifest.json` 在运行时
+选择 Savitzky-Golay、Gaussian、PCA 等算法。若未来需要一个参数化 adapter，必须先
+单独修改 ACE 框架合同。
+
+标准 adapter 接口为：
 
 ```text
-run.py --data /data --weights /weights --task task.yaml \
-       --max-samples N --out /out
+IMAGE_ENTRYPOINT --data /data --weights /weights/model.bin[!inner] \
+                 --max-samples N --out /out/metrics.json
 ```
 
-输出至少包含 ACE 兼容的 `metrics.json`、`predictions/`、`artifacts.json` 和
-`run-manifest.json`。本地与 Bohr 只替换执行后端，不替换业务参数或数据合同。
+ACE `ExecutionSpec` 持有 model/variant/dataset、镜像、参数、环境变量、输入输出、资源
+和超时，并负责 staging、metrics 摄取和 `research-report-context-1` 报告。adapter
+把 ACE 参数翻译为 HyperSpectrum local `RunPlan`，产出完整 `PredictionBundle` 后才写
+`{metrics, nSamples, durationS, artifacts}`；任何缺失输入、缺失预测或失败样品都必须
+非零退出，不能发布看似完整的 `metrics.json`。
 
-本地路径适合数据已经在 5090 或用户本地 GPU 的场景。Bohr 路径由 ACE 暂存 adapter、
-数据与权重，选择命名 GPU SKU，提交任务，轮询状态并选择性回收输出。运行记录保存：
+本地路径适合数据已经在 5090 或用户本地 GPU 的场景。Bohr 通过
+`ACEBENCH_LB_RESEARCH_BACKEND=bohr-job`、`ACEBENCH_LB_RESEARCH_BOHR_PROJECT_ID` 和
+`ACEBENCH_LB_RESEARCH_BOHR_MACHINE_TYPE` 配置；`research run` 没有 `--backend` 参数。
+Bohr 路径由 ACE 暂存 adapter、数据与权重，选择命名 GPU SKU，提交任务，轮询状态并
+选择性回收输出。运行记录保存：
 
-- HyperData dataset/version 与文件摘要；
-- TaskSpec、split manifest 和 evaluator 版本；
-- 工具源码 commit、adapter digest、镜像 tag/digest；
+- HyperData dataset/version、每项资产的 role/file/size/SHA-256/materialization/
+  `innerPath`/semantics，以及全量 split 来源与数量；materialization 必须逐资产声明为
+  `mount-file`、`mount-dir` 或 `unpack`，不能按后缀猜测；直接映射到 `MountRequest` 时，
+  `innerPath` 仅且必须随 `unpack` 出现；
+- TaskSpec、split/selection manifest、selected sample IDs、selection digest 和 evaluator
+  版本；
+- HyperSpectrum plan/model/tool/implementation/data/environment/selection 摘要；
+- ACE 根据 `common/entry.py` 与模型 `run.py` 生成的 adapter digest，以及独立的镜像
+  tag/digest；
 - 权重来源和摘要；
-- 后端、机器类型、耗时、退出码和日志；
+- ACE 返回的后端、opaque `backendHandle`、机器类型、耗时、退出码和日志；未知值使用
+  null/not-applicable，HyperSpectrum 不得伪造；
 - 预测、指标、图表与失败样品。
+
+M0 handoff 尚未进入 ACE 执行，因此当时不存在 adapter digest、image digest、backend
+或 `backendHandle`。这些 ACE 字段只能在实际提交后回填，不能用 HyperSpectrum 摘要
+冒充。
 
 ## 10. Agent 接口
 
@@ -366,9 +395,11 @@ ACE 执行逻辑的情况下注册新的 axes、artifact roles、任务、指标
 
 ### M1：XAS zero-shot 完整链路
 
-- 注册传统基线、Larch 下游工具和 XASDenoise 固定权重 adapter；
+- 把每个传统基线/概率算法注册为独立 ACE `ResearchModel` 和独立薄 adapter，并注册
+  XASDenoise 固定权重 adapter；
 - 在 5090 本地容器完成真实数据运行；
-- 使用相同 TaskSpec 和 adapter 完成一次 Bohr Job；
+- 使用相同 TaskSpec、`ExecutionSpec` 语义和各模型 adapter 完成一次 Bohr Job，且
+  HyperSpectrum `RunPlan` 在两种容器内均为 local；
 - ACE 生成 XAS Denoising Board、报告、逐样品指标和失败样品；
 - 本地与 Bohr 的确定性结果在声明容差内一致。
 
