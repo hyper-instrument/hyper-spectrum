@@ -143,6 +143,67 @@ def test_system_hd_binary_is_never_treated_as_hyperdata() -> None:
     assert runner.calls == []
 
 
+@pytest.mark.parametrize("binary", ("/bin/hd", "/usr/bin/../bin/hd"))
+def test_equivalent_system_hd_paths_are_never_treated_as_hyperdata(binary: str) -> None:
+    """Catches bypassing the system hd rejection through a path alias."""
+    runner = RecordingRunner(completed(stdout='{"records": []}\n'))
+
+    def resolve(candidate: str) -> str:
+        _ = candidate
+        return "/usr/bin/hd"
+
+    with pytest.raises(HydUnsupportedClientError) as error:
+        HydGateway(binary=binary, runner=runner, executable_resolver=resolve)
+
+    assert error.value.code == "unsupported_client"
+    assert runner.calls == []
+
+
+def test_bare_hd_resolved_through_path_is_never_treated_as_hyperdata() -> None:
+    """Catches running a PATH-resolved system hd utility as a HyperData client."""
+    resolved: list[str] = []
+    runner = RecordingRunner(completed(stdout='{"records": []}\n'))
+
+    def resolve_from_path(candidate: str) -> str:
+        resolved.append(candidate)
+        return "/usr/bin/hd"
+
+    with pytest.raises(HydUnsupportedClientError) as error:
+        HydGateway(binary="hd", runner=runner, executable_resolver=resolve_from_path)
+
+    assert error.value.code == "unsupported_client"
+    assert resolved == ["hd"]
+    assert runner.calls == []
+
+
+def test_explicit_system_hd_alias_is_rejected_even_if_a_resolver_cannot_find_it() -> None:
+    """Catches letting a custom resolver bypass canonical explicit-path checks."""
+    runner = RecordingRunner(completed(stdout='{"records": []}\n'))
+
+    with pytest.raises(HydUnsupportedClientError) as error:
+        HydGateway(
+            binary="/usr/bin/../bin/hd",
+            runner=runner,
+            executable_resolver=lambda _candidate: None,
+        )
+
+    assert error.value.code == "unsupported_client"
+    assert runner.calls == []
+
+
+def test_resolved_custom_client_path_remains_usable() -> None:
+    """Catches rejecting a legitimate custom client merely because it was resolved."""
+    runner = RecordingRunner(completed(stdout='{"records": []}\n'))
+
+    result = HydGateway(
+        binary="custom-hyd",
+        runner=runner,
+        executable_resolver=lambda _candidate: "/opt/tools/custom-hyd",
+    ).search("iron")
+
+    assert result.argv == ("custom-hyd", "search", "iron", "--ilike", "--json")
+
+
 @pytest.mark.parametrize(
     "stdout",
     [

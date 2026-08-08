@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
 from collections.abc import Sequence
 from typing import Protocol
@@ -12,6 +14,7 @@ from .models import HydCommandResult
 
 _AUTH_MARKERS = ("not authenticated", "unauthenticated", "authentication required")
 _UNSUPPORTED_MARKERS = ("unknown command", "unrecognized command", "unsupported command")
+_SYSTEM_HD_BINARY = os.path.normcase(os.path.realpath("/usr/bin/hd"))
 _BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 _NAMED_SECRET_PATTERN = re.compile(
     r"(?i)\b(?:access[_ -]?token|token|api[_ -]?key|secret|password)\b"
@@ -31,6 +34,34 @@ class CommandRunner(Protocol):
         capture_output: bool,
         timeout: float | None,
     ) -> subprocess.CompletedProcess[str]: ...
+
+
+class ExecutableResolver(Protocol):
+    """Resolve an executable path without ever invoking that executable."""
+
+    def __call__(self, binary: str) -> str | None: ...
+
+
+def _resolve_executable(binary: str) -> str | None:
+    """Resolve an explicit path or PATH lookup without starting a process."""
+    if os.path.dirname(binary):
+        return os.path.realpath(binary)
+    resolved = shutil.which(binary)
+    if resolved is None:
+        return None
+    return os.path.realpath(resolved)
+
+
+def _is_system_hd(resolved_binary: str | None) -> bool:
+    """Identify only the platform hd utility after canonical path resolution."""
+    if resolved_binary is None:
+        return False
+    return os.path.normcase(os.path.realpath(resolved_binary)) == _SYSTEM_HD_BINARY
+
+
+def _is_explicit_system_hd(binary: str) -> bool:
+    """Compare only path-like argv values directly; bare names use PATH resolution."""
+    return bool(os.path.dirname(binary)) and _is_system_hd(binary)
 
 
 def _redact_secrets(detail: str) -> str:
@@ -94,15 +125,18 @@ class HydGateway:
         *,
         timeout: float | None = 30.0,
         runner: CommandRunner | None = None,
+        executable_resolver: ExecutableResolver | None = None,
     ) -> None:
-        if binary == "/usr/bin/hd":
-            raise HydUnsupportedClientError("/usr/bin/hd is not the HyperData CLI")
         if not binary:
             raise HydClientNotFoundError("the HyperData CLI binary is empty")
         if profile is not None and not profile.strip():
             raise ValueError("profile must be a non-blank string when provided")
         if timeout is not None and timeout <= 0:
             raise ValueError("timeout must be positive when provided")
+
+        resolver = _resolve_executable if executable_resolver is None else executable_resolver
+        if _is_explicit_system_hd(binary) or _is_system_hd(resolver(binary)):
+            raise HydUnsupportedClientError("/usr/bin/hd is not the HyperData CLI")
 
         self._binary = binary
         self._profile = profile
