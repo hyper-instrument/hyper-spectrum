@@ -245,7 +245,8 @@ probe/verify 通过；输入输出与 TaskSpec 匹配；资源需求可满足；
 - 无标签或代理真值不可信：输出 inference-only 报告，不进入榜单。
 - modality facet 缺失：使用语义和文件证据继续召回，同时提出元数据修复建议。
 - 数据服务不可用：报告连接阻塞，不把旧缓存冒充在线结果。
-- 权重缺失或校验失败：模型状态为 blocked，不允许随机初始化替代。
+- 权重缺失或校验失败：在 ACE 中把 `ResearchModel.status` 设为 `pending_weights`，并在
+  证据/门禁中保留 blocker；variant 和 asset 没有 `blocked` 状态字段，不允许随机初始化替代。
 - 许可未知：允许受限环境验证，不复制源码或公开镜像。
 - 本地资源不足：提出 Bohr 计划；Bohr 不可用时保留计划，不伪造运行结果。
 
@@ -266,8 +267,19 @@ adapter，不是单一 adapter 下的运行时 variant）：
 | 派生模型 | adapter/LoRA/校准层 | one-shot 或 few-shot |
 
 主榜的 primary metric 定为按化合物分组聚合的 mean normalized spectrum RMSE，
-方向为 minimize。置信区间使用化合物分组 bootstrap；逐样品结果和分组分布必须同时
-保留。其他指标作为 secondary metrics，不得在报告生成时临时更换主指标。
+方向为 minimize。ACE `metrics` 中显式声明 `normalized_spectrum_rmse` 以及
+`normalized_spectrum_rmse_ci_low`、`normalized_spectrum_rmse_ci_high` 等每一个需要
+持久化的 secondary 数值键。置信区间使用化合物分组 bootstrap；逐样品结果和分组分布
+必须同时保留。其他指标作为 secondary metrics，不得在报告生成时临时更换主指标。
+
+精确 split/selection manifest（含 selected sample IDs 与 group assignments）注册为 data
+`ResearchAsset`；其摘要、分组键、split 方法、bootstrap unit/置信度/重采样次数以及被
+ACE 识别为完整划分大小的 `sample_count` 写入 `ResearchAsset.semantics`。逐样品和分组
+分布作为已收集 artifact 保存。不得把这些事实塞进自创的 `ResearchDataset.aggregation`、
+`splitMetadata` 或 `ResearchMetric` 扩展字段：冻结的 `CamelModel` 会忽略未声明字段，
+看似存在的 seed JSON 因而不能算持久化。
+未在 board 声明的有限数值只会被标为 `extraMetrics`，不会成为正式指标列；structured
+metric value 会被拒绝。因此二者都不能替代 asset/semantics 来承载聚合与划分合同。
 
 指标分为三个层次：
 
@@ -293,15 +305,27 @@ adapter digest。因此 M1 不得让一个 adapter 依赖同级 `tool-manifest.j
 标准 adapter 接口为：
 
 ```text
-IMAGE_ENTRYPOINT --data /data --weights /weights/model.bin[!inner] \
+IMAGE_ENTRYPOINT --data /data [--weights /weights/model.bin]... \
+                 [--weights /archive/model.tar.gz!relative/internal/path] \
                  --max-samples N --out /out/metrics.json
 ```
+
+`--weights` 可选且可重复；`!inner` 只用于需要解包并选择内部路径的 archive，不是普通
+权重路径的可选后缀。ACE 与 adapter 的 Python 字段名为 `inner_path`，JSON wire 名为
+`innerPath`。
 
 ACE `ExecutionSpec` 持有 model/variant/dataset、镜像、参数、环境变量、输入输出、资源
 和超时，并负责 staging、metrics 摄取和 `research-report-context-1` 报告。adapter
 把 ACE 参数翻译为 HyperSpectrum local `RunPlan`，产出完整 `PredictionBundle` 后才写
 `{metrics, nSamples, durationS, artifacts}`；任何缺失输入、缺失预测或失败样品都必须
 非零退出，不能发布看似完整的 `metrics.json`。
+
+每个 classical model 目录还必须提供自己的 `Dockerfile`，把 `run.py` 复制到
+`/opt/acebench/run.py`、安装固定版本的 HyperSpectrum/依赖，并把该路径设为镜像
+`ENTRYPOINT`。`acebench-lb research build <model-id> --verify` 会把同目录 `verify.py`
+通过 stdin 放进构建后的镜像执行；禁止用裸宿主机 `python verify.py` 代替镜像验证。
+外部构建镜像只能通过经过同样 in-image probe 的显式 `--image <pullable-registry-tag>`
+覆盖进入运行。
 
 本地路径适合数据已经在 5090 或用户本地 GPU 的场景。Bohr 通过
 `ACEBENCH_LB_RESEARCH_BACKEND=bohr-job`、`ACEBENCH_LB_RESEARCH_BOHR_PROJECT_ID` 和
@@ -310,9 +334,10 @@ Bohr 路径由 ACE 暂存 adapter、数据与权重，选择命名 GPU SKU，提
 选择性回收输出。运行记录保存：
 
 - HyperData dataset/version、每项资产的 role/file/size/SHA-256/materialization/
-  `innerPath`/semantics，以及全量 split 来源与数量；materialization 必须逐资产声明为
+  `inner_path`（Python，JSON wire 为 `innerPath`）/semantics，以及全量 split 来源与
+  数量；materialization 必须逐资产声明为
   `mount-file`、`mount-dir` 或 `unpack`，不能按后缀猜测；直接映射到 `MountRequest` 时，
-  `innerPath` 仅且必须随 `unpack` 出现；
+  `inner_path` 仅且必须随 `unpack` 出现；
 - TaskSpec、split/selection manifest、selected sample IDs、selection digest 和 evaluator
   版本；
 - HyperSpectrum plan/model/tool/implementation/data/environment/selection 摘要；
@@ -322,6 +347,12 @@ Bohr 路径由 ACE 暂存 adapter、数据与权重，选择命名 GPU SKU，提
 - ACE 返回的后端、opaque `backendHandle`、机器类型、耗时、退出码和日志；未知值使用
   null/not-applicable，HyperSpectrum 不得伪造；
 - 预测、指标、图表与失败样品。
+
+所有 `--max-samples 8` smoke 必须带 `--no-record --json`；ACE 返回
+`status: "completed"`、`recorded: null`，并把 raw 输出留在 reports 目录。Bohr 调度器的原始
+`SUCCEEDED` phase 只作为后端证据另存，不能替代 ACE job status。只有省略
+`--max-samples`、覆盖 `semantics.sample_count` 的完整划分运行才能 record、publish 或
+进入 ranking。
 
 M0 handoff 尚未进入 ACE 执行，因此当时不存在 adapter digest、image digest、backend
 或 `backendHandle`。这些 ACE 字段只能在实际提交后回填，不能用 HyperSpectrum 摘要
@@ -401,6 +432,7 @@ ACE 执行逻辑的情况下注册新的 axes、artifact roles、任务、指标
 - 使用相同 TaskSpec、`ExecutionSpec` 语义和各模型 adapter 完成一次 Bohr Job，且
   HyperSpectrum `RunPlan` 在两种容器内均为 local；
 - ACE 生成 XAS Denoising Board、报告、逐样品指标和失败样品；
+- 本地和 Bohr 的 8-sample smoke 均为 `--no-record`，榜单只接收完整划分运行；
 - 本地与 Bohr 的确定性结果在声明容差内一致。
 
 ### M2：少样本更新榜单
