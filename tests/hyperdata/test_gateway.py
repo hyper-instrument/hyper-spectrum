@@ -176,6 +176,21 @@ def test_bare_hd_resolved_through_path_is_never_treated_as_hyperdata() -> None:
     assert runner.calls == []
 
 
+def test_unresolved_bare_hd_fails_closed_without_running_a_candidate() -> None:
+    """Catches allowing PATH to resolve an unverified bare hd executable later."""
+    runner = RecordingRunner(completed(stdout='{"records": []}\n'))
+
+    with pytest.raises(HydUnsupportedClientError) as error:
+        HydGateway(
+            binary="hd",
+            runner=runner,
+            executable_resolver=lambda _candidate: None,
+        )
+
+    assert error.value.code == "unsupported_client"
+    assert runner.calls == []
+
+
 def test_explicit_system_hd_alias_is_rejected_even_if_a_resolver_cannot_find_it() -> None:
     """Catches letting a custom resolver bypass canonical explicit-path checks."""
     runner = RecordingRunner(completed(stdout='{"records": []}\n'))

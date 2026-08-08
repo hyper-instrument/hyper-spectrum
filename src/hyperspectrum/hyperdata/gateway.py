@@ -135,7 +135,12 @@ class HydGateway:
             raise ValueError("timeout must be positive when provided")
 
         resolver = _resolve_executable if executable_resolver is None else executable_resolver
-        if _is_explicit_system_hd(binary) or _is_system_hd(resolver(binary)):
+        resolved_binary = resolver(binary)
+        if (
+            _is_explicit_system_hd(binary)
+            or _is_system_hd(resolved_binary)
+            or (binary == "hd" and resolved_binary is None)
+        ):
             raise HydUnsupportedClientError("/usr/bin/hd is not the HyperData CLI")
 
         self._binary = binary
