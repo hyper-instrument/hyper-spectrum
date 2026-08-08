@@ -6,9 +6,11 @@ import json
 import shutil
 import sys
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
+import yaml
 from pydantic import BaseModel, ValidationError
 
 from hyperspectrum.contracts import TaskSpec
@@ -24,19 +26,22 @@ from hyperspectrum.hyperdata import (
 )
 from hyperspectrum.hyperdata.discovery import XAS_QUERIES, discover_xas
 from hyperspectrum.hyperdata.models import DatasetCandidate
+from hyperspectrum.process_boundary import redact_text, redact_value
 from hyperspectrum.registry import ResourceBudget, ToolRegistry, load_tool_manifest
-from hyperspectrum.registry.models import ToolManifest
+from hyperspectrum.registry.models import (
+    LicensePolicy,
+    ToolManifest,
+    ToolMatchRequest,
+)
 from hyperspectrum.tasks import (
     ReadinessVerdict,
     profile_xas_candidate,
     recommend_xas_tasks,
 )
 
-JsonObject = dict[str, Any]
-_ROOT = Path(__file__).resolve().parents[2]
 _TOOL_FILES = {
-    "savgol": _ROOT / "tools/xas/savgol/tool.yaml",
-    "xasdenoise": _ROOT / "tools/xas/xasdenoise/tool.yaml",
+    "savgol": "tools/xas/savgol/tool.yaml",
+    "xasdenoise": "tools/xas/xasdenoise/tool.yaml",
 }
 
 
@@ -47,6 +52,12 @@ class ServiceResponse:
     result: object
     warnings: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "result", redact_value(self.result))
+        object.__setattr__(
+            self, "warnings", tuple(redact_text(warning) for warning in self.warnings)
+        )
+
 
 class AgentServiceError(RuntimeError):
     """Stable error boundary shared by non-CLI and CLI agent callers."""
@@ -55,8 +66,8 @@ class AgentServiceError(RuntimeError):
     exit_code = 5
 
     def __init__(self, message: str, *, result: object = None) -> None:
-        super().__init__(message)
-        self.result = result
+        super().__init__(redact_text(message))
+        self.result = redact_value(result)
 
 
 class AgentRequestError(AgentServiceError):
@@ -94,10 +105,10 @@ def doctor() -> ServiceResponse:
         },
         "hyperdata_cli": {"ready": shutil.which("hyd") is not None, "binary": "hyd"},
         "task_contract": {
-            "ready": (_ROOT / "src/hyperspectrum/contracts/task.py").is_file()
+            "ready": TaskSpec.model_json_schema().get("title") == "TaskSpec"
         },
         "tool_manifests": {
-            "ready": all(path.is_file() for path in _TOOL_FILES.values()),
+            "ready": all(_resource(path).is_file() for path in _TOOL_FILES.values()),
             "ids": sorted(_TOOL_FILES),
         },
     }
@@ -119,8 +130,10 @@ def discover_data(modality: str, profile: str) -> ServiceResponse:
         candidates = discover_xas(HydGateway(profile=profile))
     except HydAuthenticationError as error:
         raise AgentAuthError(str(error)) from error
-    except (HydTransportError, HydCommandError) as error:
+    except HydTransportError as error:
         raise AgentAuthError(str(error)) from error
+    except HydCommandError as error:
+        raise AgentExecutionError(str(error)) from error
     except (
         HydClientNotFoundError,
         HydUnsupportedClientError,
@@ -159,22 +172,27 @@ def match_tools(task: str) -> ServiceResponse:
         raise AgentRequestError("M0 tool matching supports only task 'xas-denoising'")
     tools = tuple(_load_tool(tool_id) for tool_id in sorted(_TOOL_FILES))
     registry = ToolRegistry(tools)
-    matches: list[JsonObject] = []
-    blocked: list[JsonObject] = []
-    for tool in tools:
-        if not _supports_xas_denoising(tool):
-            continue
-        availability = registry.availability(tool)
-        record = {
+    request = ToolMatchRequest(
+        modality="xas",
+        task="denoising",
+        input_roles=("raw_signal",),
+        output_roles=("denoised_signal",),
+        license_policy=LicensePolicy.private_validation(),
+        weights_state="not-required",
+        resources=ResourceBudget(cpu=1, memory_gb=1.0, gpu_available=False),
+    )
+    matches = [
+        {
             "id": tool.id,
             "manifest": tool.model_dump(mode="json"),
             "tool_digest": tool.tool_digest,
-            "availability": availability.model_dump(mode="json"),
         }
-        if availability.available:
-            matches.append(record)
-        else:
-            blocked.append({**record, "reasons": list(availability.reasons)})
+        for tool in registry.match(request)
+    ]
+    blocked = [
+        {"id": rejection.tool_id, "reasons": list(rejection.reasons)}
+        for rejection in registry.rejections(request)
+    ]
     return ServiceResponse(
         result={"task": task, "matches": matches, "blocked": blocked}
     )
@@ -197,13 +215,17 @@ def plan_run(
     verdict = _read_model(verdict_file, ReadinessVerdict, "verdict file")
     tool = _load_tool(tool_id)
     registry = ToolRegistry((tool,))
+    availability = registry.availability(tool)
+    if not availability.available:
+        reasons = ", ".join(availability.reasons)
+        raise AgentMissingAssetError(f"tool '{tool.id}' is unavailable: {reasons}")
     try:
         plan = build_run_plan(
             task=task,
             dataset=candidate,
             verdict=verdict,
             tool=tool,
-            availability=registry.availability(tool),
+            availability=availability,
             backend="local",
             resources=ResourceBudget(cpu=1, memory_gb=1.0, gpu_available=False),
             max_samples=max_samples,
@@ -251,29 +273,38 @@ def _read_model(path: Path, model: type[BaseModel], label: str) -> Any:
     except json.JSONDecodeError as error:
         raise AgentRequestError(f"{label} is not valid JSON: {error.msg}") from error
     except ValidationError as error:
+        details = error.errors(include_input=False, include_url=False)
+        serialized_details = json.dumps(
+            redact_value(details),
+            sort_keys=True,
+            default=lambda value: redact_text(str(value)),
+        )
+        raise AgentRequestError(
+            f"{label} violates its contract: {serialized_details}"
+        ) from error
+    except (TypeError, ValueError) as error:
         raise AgentRequestError(f"{label} violates its contract: {error}") from error
     except OSError as error:
         raise AgentMissingAssetError(f"cannot read {label}: {error}") from error
 
 
 def _load_tool(tool_id: str) -> ToolManifest:
-    path = _TOOL_FILES.get(tool_id)
-    if path is None:
+    resource_name = _TOOL_FILES.get(tool_id)
+    if resource_name is None:
         raise AgentMissingAssetError(f"unknown tool: {tool_id}")
-    if not path.is_file():
-        raise AgentMissingAssetError(f"tool manifest does not exist: {path}")
+    resource = _resource(resource_name)
+    if not resource.is_file():
+        raise AgentMissingAssetError(f"tool manifest does not exist: {resource_name}")
     try:
-        return load_tool_manifest(path)
-    except (OSError, ValueError, ValidationError) as error:
+        raw = yaml.safe_load(resource.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise TypeError("tool manifest must be a mapping")
+        return load_tool_manifest(raw)
+    except (OSError, TypeError, ValueError, ValidationError) as error:
         raise AgentMissingAssetError(
             f"cannot load tool '{tool_id}': {error}"
         ) from error
 
 
-def _supports_xas_denoising(tool: ToolManifest) -> bool:
-    return (
-        "xas" in tool.modalities
-        and "denoising" in tool.tasks
-        and {artifact.role for artifact in tool.inputs} == {"raw_signal"}
-        and {artifact.role for artifact in tool.outputs} == {"denoised_signal"}
-    )
+def _resource(relative_path: str) -> Any:
+    return files("hyperspectrum.resources").joinpath(relative_path)

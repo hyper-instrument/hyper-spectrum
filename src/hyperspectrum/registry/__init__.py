@@ -7,6 +7,7 @@ from .models import (
     ToolAvailability,
     ToolManifest,
     ToolMatchRequest,
+    ToolRejection,
 )
 
 __all__ = [
@@ -16,5 +17,6 @@ __all__ = [
     "ToolManifest",
     "ToolMatchRequest",
     "ToolRegistry",
+    "ToolRejection",
     "load_tool_manifest",
 ]

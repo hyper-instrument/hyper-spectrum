@@ -299,9 +299,11 @@ def resolve_local_entrypoint(tool: ToolManifest) -> ResolvedEntrypoint:
     module_name, object_name = tool.entrypoint.split(":", 1)
     if not object_name.isidentifier():
         raise ValueError("tool entrypoint object must be a Python identifier")
-    repository_root = Path(__file__).resolve().parents[3]
+    package_source_root = _package_source_root()
+    if package_source_root is None:
+        raise ValueError("local package source root cannot be resolved")
     resolved_modules, parsed_modules = _resolve_local_dependency_closure(
-        module_name, repository_root
+        module_name, package_source_root
     )
     module = parsed_modules[module_name]
     if not any(
@@ -327,7 +329,7 @@ def resolve_local_entrypoint(tool: ToolManifest) -> ResolvedEntrypoint:
 
 
 def _resolve_local_dependency_closure(
-    entrypoint_module: str, repository_root: Path
+    entrypoint_module: str, package_source_root: Path
 ) -> tuple[tuple[ResolvedModule, ...], dict[str, ast.Module]]:
     pending = [entrypoint_module]
     resolved: dict[str, ResolvedModule] = {}
@@ -336,7 +338,7 @@ def _resolve_local_dependency_closure(
         module_name = pending.pop()
         if module_name in resolved:
             continue
-        source = _resolve_local_module(module_name, repository_root)
+        source = _resolve_local_module(module_name, package_source_root)
         if source is None:
             if module_name == entrypoint_module:
                 raise ValueError("tool entrypoint must resolve to local Python source")
@@ -348,16 +350,16 @@ def _resolve_local_dependency_closure(
             dependency
             for dependency in _local_import_candidates(module_name, syntax)
             if dependency not in resolved
-            and _resolve_local_module_path(dependency, repository_root) is not None
+            and _resolve_local_module_path(dependency, package_source_root) is not None
         )
     ordered_names = sorted(resolved)
     return tuple(resolved[name] for name in ordered_names), parsed
 
 
 def _resolve_local_module(
-    module_name: str, repository_root: Path
+    module_name: str, package_source_root: Path
 ) -> tuple[ResolvedModule, ast.Module] | None:
-    source_path = _resolve_local_module_path(module_name, repository_root)
+    source_path = _resolve_local_module_path(module_name, package_source_root)
     if source_path is None:
         return None
     source_bytes = source_path.read_bytes()
@@ -371,24 +373,37 @@ def _resolve_local_module(
         ResolvedModule(
             module_name=module_name,
             source_path=source_path,
-            repository_path=source_path.relative_to(repository_root).as_posix(),
+            repository_path=(
+                Path("src/hyperspectrum") / source_path.relative_to(package_source_root)
+            ).as_posix(),
             source_bytes=source_bytes,
         ),
         syntax,
     )
 
 
-def _resolve_local_module_path(module_name: str, repository_root: Path) -> Path | None:
+def _resolve_local_module_path(
+    module_name: str, package_source_root: Path
+) -> Path | None:
     spec = _module_spec(module_name)
     if spec is None or spec.origin is None:
         return None
     source_path = Path(spec.origin).resolve()
-    project_source_root = repository_root / "src"
     if source_path.suffix != ".py" or not source_path.is_relative_to(
-        project_source_root
+        package_source_root
     ):
         return None
     return source_path
+
+
+def _package_source_root() -> Path | None:
+    spec = _module_spec("hyperspectrum")
+    if spec is None or spec.submodule_search_locations is None:
+        return None
+    locations = tuple(spec.submodule_search_locations)
+    if len(locations) != 1:
+        return None
+    return Path(locations[0]).resolve()
 
 
 def _local_import_candidates(module_name: str, syntax: ast.Module) -> tuple[str, ...]:

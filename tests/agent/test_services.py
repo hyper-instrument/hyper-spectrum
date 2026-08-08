@@ -8,7 +8,14 @@ from pathlib import Path
 import pytest
 
 from hyperspectrum import agent
-from hyperspectrum.hyperdata import HydAuthenticationError
+from hyperspectrum.hyperdata import (
+    HydAuthenticationError,
+    HydClientNotFoundError,
+    HydCommandError,
+    HydTransportError,
+    HydUnsupportedClientError,
+    HydUnsupportedJsonError,
+)
 from hyperspectrum.hyperdata.models import DatasetCandidate, HydCommandResult
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -122,6 +129,38 @@ def test_discovery_maps_authentication_failure_without_fallback(
         agent.discover_data("xas", "volcano")
 
 
+@pytest.mark.parametrize(
+    ("gateway_error", "service_error", "exit_code"),
+    [
+        (HydAuthenticationError("login"), agent.AgentAuthError, 3),
+        (HydTransportError("timeout"), agent.AgentAuthError, 3),
+        (HydClientNotFoundError("missing"), agent.AgentMissingAssetError, 4),
+        (HydUnsupportedClientError("unsupported"), agent.AgentMissingAssetError, 4),
+        (HydUnsupportedJsonError("bad json"), agent.AgentMissingAssetError, 4),
+        (HydCommandError("command failed"), agent.AgentExecutionError, 5),
+    ],
+)
+def test_discovery_maps_each_gateway_failure_category(
+    monkeypatch: pytest.MonkeyPatch,
+    gateway_error: Exception,
+    service_error: type[agent.AgentServiceError],
+    exit_code: int,
+) -> None:
+    class Gateway:
+        def __init__(self, *, profile: str) -> None:
+            _ = profile
+
+        def search(self, query: str) -> HydCommandResult:
+            raise gateway_error
+
+    monkeypatch.setattr(agent, "HydGateway", Gateway)
+
+    with pytest.raises(service_error) as captured:
+        agent.discover_data("xas", "volcano")
+
+    assert captured.value.exit_code == exit_code
+
+
 def test_recommendation_reads_one_declared_candidate_file(tmp_path: Path) -> None:
     source = tmp_path / "candidate.json"
     source.write_text(candidate().model_dump_json(), encoding="utf-8")
@@ -145,9 +184,67 @@ def test_tool_matching_reports_selected_and_blocked_evidence() -> None:
     assert "weights-required-missing" in blocked["xasdenoise"]["reasons"]
 
 
+def test_tool_matching_delegates_positive_selection_to_registry_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = agent._load_tool("savgol")
+    observed: dict[str, object] = {}
+
+    class Registry:
+        def __init__(self, tools: tuple[object, ...]) -> None:
+            observed["tools"] = tools
+
+        def match(self, request: object) -> tuple[object, ...]:
+            observed["request"] = request
+            return (selected,)
+
+        def rejections(self, request: object) -> tuple[object, ...]:
+            observed["rejection_request"] = request
+            return ()
+
+    monkeypatch.setattr(agent, "ToolRegistry", Registry)
+
+    response = agent.match_tools("xas-denoising")
+
+    request = observed["request"]
+    assert request == observed["rejection_request"]
+    assert request.license_policy == agent.LicensePolicy.private_validation()  # type: ignore[attr-defined]
+    assert request.weights_state == "not-required"  # type: ignore[attr-defined]
+    assert request.resources == agent.ResourceBudget(  # type: ignore[attr-defined]
+        cpu=1, memory_gb=1, gpu_available=False
+    )
+    assert response.result["matches"][0]["id"] == "savgol"  # type: ignore[index]
+
+
 def test_missing_json_input_is_a_stable_missing_asset_error(tmp_path: Path) -> None:
     with pytest.raises(agent.AgentMissingAssetError, match="candidate file"):
         agent.recommend_task(tmp_path / "absent.json")
+
+
+def test_model_validator_error_remains_a_useful_request_error(tmp_path: Path) -> None:
+    verdict_file = tmp_path / "invalid-verdict.json"
+    verdict_file.write_text(
+        json.dumps(
+            {
+                "dataset_code": "XAS-1",
+                "dataset_version": "v1",
+                "content_digest": "a" * 64,
+                "status": "scoreable",
+                "reasons": [],
+                "candidate_tasks": [],
+                "ground_truth_roles": [],
+                "split_group_keys": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        agent.AgentRequestError, match="exactly one candidate task"
+    ) as captured:
+        agent._read_model(verdict_file, agent.ReadinessVerdict, "verdict file")
+
+    assert captured.value.exit_code == 2
 
 
 def test_plan_service_uses_public_planner_and_returns_serializable_plan(

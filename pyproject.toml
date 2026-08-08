@@ -12,8 +12,12 @@ dependencies = [
     "jsonschema>=4.23,<5",
 ]
 
+[build-system]
+requires = ["uv_build>=0.10.10,<0.11"]
+build-backend = "uv_build"
+
 [project.scripts]
-hyperspectrum = "hyperspectrum.cli:app"
+hyperspectrum = "hyperspectrum.cli:main"
 
 [dependency-groups]
 dev = [

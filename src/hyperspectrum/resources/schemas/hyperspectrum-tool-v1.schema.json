@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyperspectrum.dev/schemas/hyperspectrum-tool-v1.schema.json",
+  "title": "HyperSpectrum Tool Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "version", "modalities", "tasks", "runtime", "entrypoint", "inputs", "outputs", "resources", "verify", "source", "license", "distribution", "weights", "training"],
+  "properties": {
+    "schema_version": {"const": "hyperspectrum-tool/v1"},
+    "id": {"type": "string", "minLength": 1},
+    "version": {"type": "string", "minLength": 1},
+    "modalities": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
+    "tasks": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
+    "runtime": {
+      "type": "object", "additionalProperties": false, "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["python", "container"]},
+        "image": {"type": "string", "pattern": "^.+@sha256:[0-9a-f]{64}$"}
+      },
+      "allOf": [{"if": {"properties": {"kind": {"const": "container"}}, "required": ["kind"]}, "then": {"required": ["image"]}}]
+    },
+    "entrypoint": {"type": "string", "minLength": 1},
+    "inputs": {"$ref": "#/$defs/artifactArray"},
+    "outputs": {"allOf": [{"$ref": "#/$defs/artifactArray"}, {"minItems": 1}]},
+    "resources": {"$ref": "#/$defs/resources"},
+    "verify": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+    "source": {"$ref": "#/$defs/source"},
+    "license": {"type": "string", "minLength": 1},
+    "distribution": {"enum": ["open-distribution", "private-validation-only"]},
+    "weights": {"$ref": "#/$defs/weights"},
+    "training": {"type": "object", "additionalProperties": false, "required": ["enabled"], "properties": {"enabled": {"const": false}}}
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object", "additionalProperties": false, "required": ["role", "kind"],
+      "properties": {
+        "role": {"enum": ["raw_signal", "denoised_signal", "normalized_signal", "ground_truth", "prediction", "metadata", "mask", "region", "peak_table", "structure", "graph", "scalar", "class", "multilabel", "distribution"]},
+        "kind": {"enum": ["dense_array", "peak_table", "image", "mask", "region", "structure", "graph", "scalar", "class", "multilabel", "distribution", "metadata"]}
+      }
+    },
+    "artifactArray": {
+      "type": "array", "items": {"$ref": "#/$defs/artifact"},
+      "allOf": [
+        {"contains": {"properties": {"role": {"const": "raw_signal"}}, "required": ["role"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "denoised_signal"}}, "required": ["role"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "normalized_signal"}}, "required": ["role"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "ground_truth"}}, "required": ["role"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "prediction"}}, "required": ["role"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "metadata"}}, "required": ["role"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "mask"}}, "required": ["role"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "region"}}, "required": ["role"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "peak_table"}}, "required": ["role"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "structure"}}, "required": ["role"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "graph"}}, "required": ["role"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "scalar"}}, "required": ["role"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "class"}}, "required": ["role"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "multilabel"}}, "required": ["role"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "distribution"}}, "required": ["role"]}, "minContains": 0, "maxContains": 1}
+      ]
+    },
+    "resources": {
+      "type": "object", "additionalProperties": false, "required": ["cpu", "memory_gb", "gpu"],
+      "properties": {"cpu": {"type": "integer", "minimum": 1}, "memory_gb": {"type": "number", "exclusiveMinimum": 0}, "gpu": {"enum": ["none", "optional", "required"]}}
+    },
+    "source": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["kind", "repository", "commit"], "properties": {"kind": {"const": "git"}, "repository": {"type": "string", "minLength": 1}, "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "release": {"type": "null"}, "package": {"type": "null"}, "version": {"type": "null"}, "revision": {"type": "null"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "repository", "release"], "properties": {"kind": {"const": "git"}, "repository": {"type": "string", "minLength": 1}, "commit": {"type": "null"}, "release": {"type": "string", "pattern": "^v?\\d+(?:\\.\\d+)+(?:[-.]?(?:a|alpha|b|beta|rc|pre|preview|post|dev)\\d*(?:\\.\\d+)*)?(?:\\+[0-9A-Za-z.-]+)?$"}, "package": {"type": "null"}, "version": {"type": "null"}, "revision": {"type": "null"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "package", "version", "revision"], "properties": {"kind": {"const": "local-package"}, "repository": {"type": "null"}, "commit": {"type": "null"}, "release": {"type": "null"}, "package": {"type": "string", "minLength": 1}, "version": {"type": "string", "pattern": "^v?\\d+(?:\\.\\d+)+(?:[-.]?(?:a|alpha|b|beta|rc|pre|preview|post|dev)\\d*(?:\\.\\d+)*)?(?:\\+[0-9A-Za-z.-]+)?$"}, "revision": {"anyOf": [{"type": "string", "pattern": "^[0-9a-f]{40}$"}, {"type": "string", "pattern": "^v?\\d+(?:\\.\\d+)+(?:[-.]?(?:a|alpha|b|beta|rc|pre|preview|post|dev)\\d*(?:\\.\\d+)*)?(?:\\+[0-9A-Za-z.-]+)?$"}]}}}
+      ]
+    },
+    "weights": {
+      "type": "object", "additionalProperties": false, "required": ["required", "state", "allow_download"],
+      "properties": {"required": {"type": "boolean"}, "state": {"enum": ["not-required", "present", "required-missing"]}, "allow_download": {"const": false}, "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+      "allOf": [
+        {"if": {"properties": {"required": {"const": true}}}, "then": {"properties": {"state": {"enum": ["present", "required-missing"]}}}},
+        {"if": {"properties": {"required": {"const": false}}}, "then": {"properties": {"state": {"const": "not-required"}}}},
+        {"if": {"properties": {"state": {"const": "present"}}}, "then": {"required": ["digest"]}},
+        {"if": {"properties": {"state": {"enum": ["not-required", "required-missing"]}}}, "then": {"not": {"required": ["digest"]}}}
+      ]
+    }
+  }
+}

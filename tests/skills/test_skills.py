@@ -75,6 +75,8 @@ def test_run_skill_enforces_dry_run_leakage_overwrite_and_authority_gates() -> N
         "training/fine-tuning",
         "publication",
         "hyperspectrum run local",
+        "exactly `energy`, `noisy`, `sample_ids`, `group_ids`, and `energy_unit`",
+        "reject every extra member",
         "ace owns formal",
     ):
         assert required in text

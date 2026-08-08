@@ -1,0 +1,31 @@
+schema_version: hyperspectrum-tool/v1
+id: xasdenoise
+version: 22363b96cd1e797f7b34d39948f50f4d4b899a2c
+modalities: [xas]
+tasks: [denoising]
+runtime:
+  kind: python
+entrypoint: adapters/xasdenoise/run.py
+inputs:
+  - role: raw_signal
+    kind: dense_array
+outputs:
+  - role: denoised_signal
+    kind: dense_array
+resources:
+  cpu: 4
+  memory_gb: 16
+  gpu: optional
+verify: [python, -m, hyperspectrum.adapters.xasdenoise, --verify]
+source:
+  kind: git
+  repository: https://github.com/Even-Ma/xas.git
+  commit: 22363b96cd1e797f7b34d39948f50f4d4b899a2c
+license: unknown
+distribution: private-validation-only
+weights:
+  required: true
+  state: required-missing
+  allow_download: false
+training:
+  enabled: false

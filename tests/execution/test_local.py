@@ -13,6 +13,7 @@ import pytest
 from hyperspectrum.contracts import PredictionBundle
 from hyperspectrum.execution import local
 from hyperspectrum.execution.local import execute_local_run
+from hyperspectrum.execution.plan import RunPlan
 from hyperspectrum.hyperdata.models import DatasetCandidate
 from hyperspectrum.tasks.recommend import ReadinessVerdict
 
@@ -38,6 +39,29 @@ def verdict_for_source(path: Path) -> ReadinessVerdict:
     )
 
 
+def noisy_source(path: Path) -> Path:
+    with np.load(FIXTURE, allow_pickle=False) as data:
+        np.savez(
+            path,
+            energy=data["energy"],
+            noisy=data["noisy"],
+            sample_ids=data["sample_ids"],
+            group_ids=data["group_ids"],
+            energy_unit=data["energy_unit"],
+        )
+    return path
+
+
+def inference_plan(tmp_path: Path, **changes: object) -> tuple[Path, RunPlan]:
+    source = noisy_source(tmp_path / "noisy-input.npz")
+    values: dict[str, object] = {
+        "dataset": dataset_for_source(source),
+        "verdict": verdict_for_source(source),
+    }
+    values.update(changes)
+    return source, plan(tmp_path, **values)
+
+
 def assert_no_scoring_fields(value: object) -> None:
     forbidden = {
         "ground_truth",
@@ -61,14 +85,14 @@ def test_local_savgol_smoke_publishes_a_complete_prediction_bundle_without_scori
     tmp_path: Path,
 ) -> None:
     # Break caught: local smoke execution could publish incomplete artifacts or ACE-owned scores.
-    run_plan = plan(tmp_path)
+    source, run_plan = inference_plan(tmp_path)
     selected = fixture_ids()
 
     returned = execute_local_run(
         run_plan,
         tool=savgol(),
         selected_sample_ids=selected,
-        source_npz=FIXTURE,
+        source_npz=source,
     )
 
     assert run_plan.output_directory.is_dir()
@@ -132,11 +156,12 @@ def test_executor_runs_fresh_verified_source_not_a_preimported_callable(
 
     monkeypatch.setattr(baselines, "savgol_filter", wrong_callable)
 
+    source, run_plan = inference_plan(tmp_path)
     bundle = execute_local_run(
-        plan(tmp_path),
+        run_plan,
         tool=savgol(),
         selected_sample_ids=fixture_ids(1),
-        source_npz=FIXTURE,
+        source_npz=source,
     )
 
     assert len(bundle.predictions) == 1
@@ -156,14 +181,14 @@ def test_executor_uses_verified_dependency_bytes_not_cached_module_objects(
             self.intensity = np.zeros_like(values["intensity"])
             self.energy_unit = values["energy_unit"]
 
-    run_plan = plan(tmp_path)
+    source, run_plan = inference_plan(tmp_path)
     monkeypatch.setattr(arrays, "XASSpectrum", WrongSpectrum)
 
     bundle = execute_local_run(
         run_plan,
         tool=savgol(),
         selected_sample_ids=fixture_ids(1),
-        source_npz=FIXTURE,
+        source_npz=source,
     )
 
     with np.load(
@@ -178,7 +203,7 @@ def test_executor_rejects_changed_local_dependency_bytes(
     # Break caught: arrays.py could change after planning while every recorded digest stayed fixed.
     dependency = (ROOT / "src/hyperspectrum/plugins/xas/arrays.py").resolve()
     original_read_bytes = Path.read_bytes
-    run_plan = plan(tmp_path)
+    source, run_plan = inference_plan(tmp_path)
 
     def changed_read_bytes(path: Path) -> bytes:
         contents = original_read_bytes(path)
@@ -193,7 +218,7 @@ def test_executor_rejects_changed_local_dependency_bytes(
             run_plan,
             tool=savgol(),
             selected_sample_ids=fixture_ids(1),
-            source_npz=FIXTURE,
+            source_npz=source,
         )
 
     assert not run_plan.output_directory.exists()
@@ -259,13 +284,15 @@ def test_model_failures_are_recorded_one_for_one_without_disappearing(
     tmp_path: Path,
 ) -> None:
     # Break caught: sample-level model failures could be dropped or abort an otherwise complete run record.
-    run_plan = plan(tmp_path, parameters={"window_length": 4, "polyorder": 2})
+    source, run_plan = inference_plan(
+        tmp_path, parameters={"window_length": 4, "polyorder": 2}
+    )
 
     bundle = execute_local_run(
         run_plan,
         tool=savgol(),
         selected_sample_ids=fixture_ids(),
-        source_npz=FIXTURE,
+        source_npz=source,
     )
 
     assert bundle.predictions == ()
@@ -331,16 +358,132 @@ def test_dry_run_plan_cannot_execute_or_materialize_inputs(tmp_path: Path) -> No
     assert not run_plan.output_directory.exists()
 
 
+@pytest.mark.parametrize(
+    "forbidden_key",
+    [
+        "clean",
+        "target",
+        "ground_truth",
+        "labels",
+        "metric",
+        "score",
+        "ground_truth_roles",
+    ],
+)
+def test_inference_source_rejects_every_extra_array_before_tool_loading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, forbidden_key: str
+) -> None:
+    source = tmp_path / f"forbidden-{forbidden_key}.npz"
+    with np.load(FIXTURE, allow_pickle=False) as data:
+        values = {
+            key: data[key]
+            for key in ("energy", "noisy", "sample_ids", "group_ids", "energy_unit")
+        }
+    values[forbidden_key] = np.array(["must-not-cross-boundary"])
+    np.savez(source, **values)
+    run_plan = plan(
+        tmp_path,
+        dataset=dataset_for_source(source),
+        verdict=verdict_for_source(source),
+    )
+
+    def forbidden_loader(*args: object, **kwargs: object) -> object:
+        raise AssertionError("tool code must not load")
+
+    monkeypatch.setattr(local, "_load_savgol_callable", forbidden_loader)
+
+    with pytest.raises(ValueError, match="inference-only"):
+        execute_local_run(
+            run_plan,
+            tool=savgol(),
+            selected_sample_ids=fixture_ids(1),
+            source_npz=source,
+        )
+
+    assert not run_plan.output_directory.exists()
+
+
+def test_separately_digested_noisy_only_source_executes_successfully(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "noisy-only.npz"
+    with np.load(FIXTURE, allow_pickle=False) as data:
+        np.savez(
+            source,
+            energy=data["energy"],
+            noisy=data["noisy"],
+            sample_ids=data["sample_ids"],
+            group_ids=data["group_ids"],
+            energy_unit=data["energy_unit"],
+        )
+    run_plan = plan(
+        tmp_path,
+        dataset=dataset_for_source(source),
+        verdict=verdict_for_source(source),
+    )
+
+    bundle = execute_local_run(
+        run_plan,
+        tool=savgol(),
+        selected_sample_ids=fixture_ids(2),
+        source_npz=source,
+    )
+
+    assert len(bundle.predictions) == 2
+
+
+def test_structured_noisy_array_is_rejected_before_tool_loading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "structured-noisy.npz"
+    with np.load(FIXTURE, allow_pickle=False) as data:
+        noisy = np.empty(
+            data["noisy"].shape,
+            dtype=[("signal", np.float64), ("ground_truth", np.float64)],
+        )
+        noisy["signal"] = data["noisy"]
+        noisy["ground_truth"] = data["clean"]
+        np.savez(
+            source,
+            energy=data["energy"],
+            noisy=noisy,
+            sample_ids=data["sample_ids"],
+            group_ids=data["group_ids"],
+            energy_unit=data["energy_unit"],
+        )
+    run_plan = plan(
+        tmp_path,
+        dataset=dataset_for_source(source),
+        verdict=verdict_for_source(source),
+    )
+
+    def forbidden_loader(*args: object, **kwargs: object) -> object:
+        raise AssertionError("tool code must not load")
+
+    monkeypatch.setattr(local, "_load_savgol_callable", forbidden_loader)
+
+    with pytest.raises(ValueError, match="structured"):
+        execute_local_run(
+            run_plan,
+            tool=savgol(),
+            selected_sample_ids=fixture_ids(1),
+            source_npz=source,
+        )
+
+    assert not run_plan.output_directory.exists()
+
+
 def test_executor_rejects_a_changed_implementation_digest(tmp_path: Path) -> None:
     # Break caught: source-code changes after planning could execute under stale model provenance.
-    run_plan = plan(tmp_path).model_copy(update={"implementation_digest": "f" * 64})
+    source, valid_plan = inference_plan(tmp_path)
+    run_plan = valid_plan.model_copy(update={"implementation_digest": "f" * 64})
 
     with pytest.raises(ValueError, match="implementation digest"):
         execute_local_run(
             run_plan,
             tool=savgol(),
             selected_sample_ids=fixture_ids(),
-            source_npz=FIXTURE,
+            source_npz=source,
         )
 
     assert not run_plan.output_directory.exists()
@@ -368,14 +511,14 @@ def test_savgol_policy_rejects_a_different_manifest_entrypoint(tmp_path: Path) -
     changed = savgol().model_copy(
         update={"entrypoint": "hyperspectrum.plugins.xas.baselines:identity_filter"}
     )
-    run_plan = plan(tmp_path, tool=changed)
+    source, run_plan = inference_plan(tmp_path, tool=changed)
 
     with pytest.raises(ValueError, match="SavGol entrypoint"):
         execute_local_run(
             run_plan,
             tool=changed,
             selected_sample_ids=fixture_ids(),
-            source_npz=FIXTURE,
+            source_npz=source,
         )
 
 
@@ -399,7 +542,7 @@ def test_destination_created_immediately_before_publish_is_not_replaced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Break caught: a check-then-rename TOCTOU could overwrite a concurrent empty directory.
-    run_plan = plan(tmp_path)
+    source, run_plan = inference_plan(tmp_path)
     real_publish = local._atomic_rename_noreplace
 
     def collide(source: Path, destination: Path) -> None:
@@ -413,7 +556,7 @@ def test_destination_created_immediately_before_publish_is_not_replaced(
             run_plan,
             tool=savgol(),
             selected_sample_ids=fixture_ids(),
-            source_npz=FIXTURE,
+            source_npz=source,
         )
 
     assert run_plan.output_directory.is_dir()
@@ -464,14 +607,15 @@ def test_executor_rejects_a_manifest_that_does_not_match_the_immutable_plan(
     tmp_path: Path,
 ) -> None:
     # Break caught: an executor could run changed tool semantics under an old provenance digest.
-    run_plan = plan(tmp_path).model_copy(update={"tool_digest": "f" * 64})
+    source, valid_plan = inference_plan(tmp_path)
+    run_plan = valid_plan.model_copy(update={"tool_digest": "f" * 64})
 
     with pytest.raises(ValueError, match="tool digest"):
         execute_local_run(
             run_plan,
             tool=savgol(),
             selected_sample_ids=fixture_ids(),
-            source_npz=FIXTURE,
+            source_npz=source,
         )
 
     assert not run_plan.output_directory.exists()

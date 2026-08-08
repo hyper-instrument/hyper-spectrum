@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable
+from io import StringIO
 from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from typer._click import ClickException
 
 from hyperspectrum import agent as services
+from hyperspectrum.process_boundary import redact_text, redact_value
 
 app = typer.Typer(no_args_is_help=True, help="Agent-ready spectroscopy runtime.")
 data_app = typer.Typer(no_args_is_help=True, help="Discover spectroscopy data.")
@@ -161,12 +165,38 @@ def _emit_envelope(
     envelope: dict[str, Any] = {
         "schema_version": "hyperspectrum-cli/v1",
         "ok": ok,
-        "result": result,
-        "warnings": list(warnings),
-        "error": error,
+        "result": redact_value(result),
+        "warnings": redact_value(list(warnings)),
+        "error": redact_value(error),
     }
     typer.echo(json.dumps(envelope, sort_keys=True, separators=(",", ":")))
 
 
+def main() -> None:
+    """Run Typer behind a JSON-aware boundary that includes parse failures."""
+
+    json_output = "--json" in sys.argv[1:]
+    try:
+        exit_code = app(standalone_mode=False)
+        if isinstance(exit_code, int) and exit_code:
+            raise SystemExit(exit_code)
+    except ClickException as error:
+        rendered_error = StringIO()
+        error.show(file=rendered_error)
+        sys.stderr.write(redact_text(rendered_error.getvalue()))
+        if json_output:
+            _emit_envelope(
+                ok=False,
+                result=None,
+                error={
+                    "code": "invalid_or_not_ready",
+                    "message": error.format_message(),
+                },
+            )
+        raise SystemExit(error.exit_code) from error
+    except typer.Exit as error:
+        raise SystemExit(error.exit_code) from error
+
+
 if __name__ == "__main__":
-    app()
+    main()

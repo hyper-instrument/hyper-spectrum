@@ -346,6 +346,92 @@ def test_new_local_savgol_wrapper_is_executable_while_external_adapter_remains_u
 
 
 @pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"license": "approved"}, "license-not-allowed"),
+        ({"distribution": "open-distribution"}, "distribution-not-allowed"),
+        (
+            {
+                "weights": {
+                    "required": True,
+                    "state": "present",
+                    "allow_download": False,
+                    "digest": "b" * 64,
+                }
+            },
+            "weights-state-mismatch",
+        ),
+        ({"resources": {"cpu": 2, "memory_gb": 1, "gpu": "none"}}, "cpu-insufficient"),
+        (
+            {"resources": {"cpu": 1, "memory_gb": 2, "gpu": "none"}},
+            "memory-insufficient",
+        ),
+        (
+            {"resources": {"cpu": 1, "memory_gb": 1, "gpu": "required"}},
+            "gpu-unavailable",
+        ),
+        (
+            {"inputs": [{"role": "normalized_signal", "kind": "dense_array"}]},
+            "input-roles-mismatch",
+        ),
+        (
+            {"outputs": [{"role": "prediction", "kind": "dense_array"}]},
+            "output-roles-mismatch",
+        ),
+        ({"modalities": ["raman"]}, "modality-mismatch"),
+        ({"tasks": ["oxidation_state_classification"]}, "task-mismatch"),
+    ],
+)
+def test_registry_reports_each_policy_rejection_reason(
+    change: dict[str, object], reason: str
+) -> None:
+    data = deepcopy(manifest())
+    data.update(change)
+    tool = load_tool_manifest(data)
+    registry = ToolRegistry(
+        (tool,), availability_resolver=lambda _: ToolAvailability(available=True)
+    )
+    request = ToolMatchRequest(
+        modality="xas",
+        task="denoising",
+        input_roles=("raw_signal",),
+        output_roles=("denoised_signal",),
+        license_policy=LicensePolicy.private_validation(),
+        weights_state="not-required",
+        resources=ResourceBudget(cpu=1, memory_gb=1, gpu_available=False),
+    )
+
+    rejection = registry.rejections(request)[0]
+
+    assert rejection.tool_id == tool.id
+    assert reason in rejection.reasons
+    assert registry.match(request) == ()
+
+
+def test_registry_reports_availability_rejection_reason() -> None:
+    tool = load_tool_manifest(manifest())
+    registry = ToolRegistry(
+        (tool,),
+        availability_resolver=lambda _: ToolAvailability(
+            available=False, reasons=("entrypoint-unresolvable",)
+        ),
+    )
+    request = ToolMatchRequest(
+        modality="xas",
+        task="denoising",
+        input_roles=("raw_signal",),
+        output_roles=("denoised_signal",),
+        license_policy=LicensePolicy.private_validation(),
+        weights_state="required-missing",
+        resources=ResourceBudget(cpu=4, memory_gb=16, gpu_available=False),
+    )
+
+    rejection = registry.rejections(request)[0]
+
+    assert rejection.reasons == ("entrypoint-unresolvable",)
+
+
+@pytest.mark.parametrize(
     "entrypoint",
     [
         "hyperspectrum:missing_function",

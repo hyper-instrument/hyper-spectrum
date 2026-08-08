@@ -45,6 +45,15 @@ class _ResolvedSavGol:
     isolated_module_names: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _InferenceSource:
+    energy: Any
+    noisy: Any
+    sample_ids: tuple[str, ...]
+    group_ids: tuple[str, ...]
+    energy_unit: str
+
+
 def execute_local_run(
     plan: RunPlan,
     *,
@@ -66,16 +75,16 @@ def execute_local_run(
         raise ValueError(
             "execution environment digest does not match the immutable plan"
         )
-    resolved_entrypoint = _verify_savgol_identity(plan, tool)
-
     source_bytes = source_npz.read_bytes()
     source_digest = sha256(source_bytes).hexdigest()
     if source_digest != plan.data_digest:
         raise ValueError("source NPZ data digest does not match the immutable plan")
+    inference_source = _load_inference_source(source_bytes, selected)
+    resolved_entrypoint = _verify_savgol_identity(plan, tool)
     resolved_tool = _load_savgol_callable(resolved_entrypoint)
     try:
         spectra = _load_selected_spectra(
-            source_bytes, selected, resolved_tool.spectrum_type
+            inference_source, selected, resolved_tool.spectrum_type
         )
         window_length, polyorder = _savgol_parameters(plan)
         results = resolved_tool.runner(
@@ -224,43 +233,106 @@ def _load_savgol_callable(resolved: ResolvedEntrypoint) -> _ResolvedSavGol:
 
 
 def _load_selected_spectra(
-    source_bytes: bytes,
+    source: _InferenceSource,
     selected: tuple[str, ...],
     spectrum_type: type[Any],
 ) -> tuple[object, ...]:
-    required = {"energy", "noisy", "sample_ids", "group_ids", "energy_unit"}
-    with np.load(io.BytesIO(source_bytes), allow_pickle=False) as source:
-        if not required.issubset(source.files):
-            raise ValueError("source NPZ is missing required noisy-input arrays")
-        energy = np.asarray(source["energy"])
-        noisy = np.asarray(source["noisy"])
-        sample_ids = tuple(str(value) for value in source["sample_ids"])
-        group_ids = tuple(str(value) for value in source["group_ids"])
-        energy_unit = str(source["energy_unit"])
-        if (
-            energy.ndim != 2
-            or noisy.ndim != 2
-            or energy.shape != noisy.shape
-            or len(sample_ids) != energy.shape[0]
-            or len(group_ids) != energy.shape[0]
-            or len(sample_ids) != len(set(sample_ids))
-        ):
-            raise ValueError("source NPZ contains malformed noisy-input arrays")
-        index_by_id = {sample_id: index for index, sample_id in enumerate(sample_ids)}
-        if any(sample_id not in index_by_id for sample_id in selected):
-            raise ValueError(
-                "source NPZ does not contain the complete selected input set"
-            )
-        return tuple(
-            spectrum_type(
-                sample_id=sample_id,
-                group_id=group_ids[index_by_id[sample_id]],
-                energy=energy[index_by_id[sample_id]],
-                intensity=noisy[index_by_id[sample_id]],
-                energy_unit=energy_unit,
-            )
-            for sample_id in selected
+    index_by_id = {
+        sample_id: index for index, sample_id in enumerate(source.sample_ids)
+    }
+    return tuple(
+        spectrum_type(
+            sample_id=sample_id,
+            group_id=source.group_ids[index_by_id[sample_id]],
+            energy=source.energy[index_by_id[sample_id]],
+            intensity=source.noisy[index_by_id[sample_id]],
+            energy_unit=source.energy_unit,
         )
+        for sample_id in selected
+    )
+
+
+def _load_inference_source(
+    source_bytes: bytes, selected: tuple[str, ...]
+) -> _InferenceSource:
+    """Fully validate and detach noisy inference data before tool code loads."""
+
+    allowed = {"energy", "noisy", "sample_ids", "group_ids", "energy_unit"}
+    with np.load(io.BytesIO(source_bytes), allow_pickle=False) as source:
+        observed = set(source.files)
+        if observed != allowed or len(source.files) != len(allowed):
+            missing = sorted(allowed - observed)
+            extra = sorted(observed - allowed)
+            raise ValueError(
+                "inference-only NPZ keys must match exactly; "
+                f"missing={missing}, extra={extra}"
+            )
+        energy = np.array(source["energy"], copy=True)
+        noisy = np.array(source["noisy"], copy=True)
+        sample_id_values = np.array(source["sample_ids"], copy=True)
+        group_id_values = np.array(source["group_ids"], copy=True)
+        energy_unit_value = np.array(source["energy_unit"], copy=True)
+
+    for name, array in (("energy", energy), ("noisy", noisy)):
+        if array.dtype.fields is not None:
+            raise ValueError(f"source NPZ {name} must not use a structured dtype")
+        if array.dtype.kind not in "fiu":
+            raise ValueError(f"source NPZ {name} must be a real numeric array")
+    for name, array in (
+        ("sample_ids", sample_id_values),
+        ("group_ids", group_id_values),
+    ):
+        if array.dtype.fields is not None or array.dtype.kind != "U":
+            raise ValueError(f"source NPZ {name} must be a plain string array")
+    if (
+        energy_unit_value.dtype.fields is not None
+        or energy_unit_value.dtype.kind != "U"
+        or energy_unit_value.shape != ()
+    ):
+        raise ValueError("source NPZ energy_unit must be one plain string")
+
+    sample_ids = tuple(str(value) for value in sample_id_values)
+    group_ids = tuple(str(value) for value in group_id_values)
+    energy_unit = str(energy_unit_value)
+    malformed = (
+        energy.ndim != 2
+        or noisy.ndim != 2
+        or energy.shape != noisy.shape
+        or energy.shape[0] == 0
+        or energy.shape[1] < 2
+        or sample_id_values.ndim != 1
+        or group_id_values.ndim != 1
+        or len(sample_ids) != energy.shape[0]
+        or len(group_ids) != energy.shape[0]
+        or any(not value.strip() for value in sample_ids)
+        or any(not value.strip() for value in group_ids)
+        or len(sample_ids) != len(set(sample_ids))
+        or energy_unit != "eV"
+        or not np.isfinite(energy).all()
+        or not np.isfinite(noisy).all()
+    )
+    if malformed:
+        raise ValueError("source NPZ contains malformed noisy-input arrays")
+    differences = np.diff(energy, axis=1)
+    if not np.all(
+        np.logical_or(
+            np.all(differences > 0.0, axis=1),
+            np.all(differences < 0.0, axis=1),
+        )
+    ):
+        raise ValueError("source NPZ energy rows must be strictly monotonic")
+    index_by_id = {sample_id: index for index, sample_id in enumerate(sample_ids)}
+    if any(sample_id not in index_by_id for sample_id in selected):
+        raise ValueError("source NPZ does not contain the complete selected input set")
+    energy.setflags(write=False)
+    noisy.setflags(write=False)
+    return _InferenceSource(
+        energy=energy,
+        noisy=noisy,
+        sample_ids=sample_ids,
+        group_ids=group_ids,
+        energy_unit=energy_unit,
+    )
 
 
 def _savgol_parameters(plan: RunPlan) -> tuple[int, int]:

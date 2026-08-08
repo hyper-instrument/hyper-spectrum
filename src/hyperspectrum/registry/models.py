@@ -334,6 +334,15 @@ AvailabilityReason = Literal[
 ]
 
 
+class ToolRejection(BaseModel):
+    """Machine-readable reasons one tool failed an explicit match request."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tool_id: str
+    reasons: tuple[str, ...] = Field(min_length=1)
+
+
 class ToolAvailability(BaseModel):
     """Safe, machine-readable executable availability determined by a resolver."""
 

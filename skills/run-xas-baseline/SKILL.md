@@ -69,6 +69,9 @@ After explicit local-run authorization, re-check that `RUN_DIR` is absent, repea
 ```
 
 Repeat `--sample-id` for each predeclared sample. Supply noisy inference inputs;
-do not materialize clean targets for HyperSpectrum. Return the unaltered envelope
-and artifact/digest evidence. Exit `2` means invalid/not ready, `3` auth/connection,
-`4` missing asset/tool, and `5` execution failure: report and stop without fallback.
+do not materialize clean targets for HyperSpectrum. The inference-only NPZ must
+contain exactly `energy`, `noisy`, `sample_ids`, `group_ids`, and `energy_unit`.
+Reject every extra member, including metadata, labels, targets, ground truth,
+metrics, and scores. Return the unaltered envelope and artifact/digest evidence.
+Exit `2` means invalid/not ready, `3` auth/connection, `4` missing asset/tool,
+and `5` execution failure: report and stop without fallback.

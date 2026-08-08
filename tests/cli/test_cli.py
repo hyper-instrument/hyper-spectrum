@@ -26,7 +26,7 @@ def test_project_installs_the_hyperspectrum_console_script() -> None:
     root = Path(__file__).resolve().parents[2]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert project["project"]["scripts"]["hyperspectrum"] == "hyperspectrum.cli:app"
+    assert project["project"]["scripts"]["hyperspectrum"] == "hyperspectrum.cli:main"
     assert project["tool"]["uv"]["package"] is True
 
 
