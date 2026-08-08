@@ -3,32 +3,107 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Protocol, cast
 
 from hyperspectrum.contracts.json import freeze_json_mapping
 
-from .gateway import HydUnsupportedJsonError
+from .gateway import HydIncompleteSearchError, HydUnsupportedJsonError
 from .models import DatasetCandidate, HydCommandResult
 
 XAS_QUERIES = ("XAS", "XANES", "EXAFS", "absorption edge")
+XAS_PAGE_LIMIT = 20
+XAS_MAX_PAGES = 50
+XAS_MAX_RESULTS = 1_000
+
+
+@dataclass(frozen=True, slots=True)
+class QueryCompletion:
+    """Proof that one fixed query was read through its final catalog page."""
+
+    query: str
+    pages: int
+    total: int
+    records: int
+
+
+@dataclass(frozen=True, slots=True)
+class XasDiscoveryResult:
+    """Ranked candidates plus explicit, machine-readable search completion."""
+
+    candidates: tuple[DatasetCandidate, ...]
+    completion: tuple[QueryCompletion, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _SearchPage:
+    records: tuple[Mapping[str, object], ...]
+    page: int
+    limit: int
+    total: int
+    has_next: bool
+    legacy_complete: bool = False
 
 
 class SearchGateway(Protocol):
     """The narrow result boundary needed for catalog-only candidate discovery."""
 
-    def search(self, query: str) -> HydCommandResult: ...
+    def search(self, query: str, *, page: int, limit: int) -> HydCommandResult: ...
 
 
-def discover_xas(gateway: SearchGateway) -> tuple[DatasetCandidate, ...]:
+def discover_xas(
+    gateway: SearchGateway,
+    *,
+    page_limit: int = XAS_PAGE_LIMIT,
+    max_pages: int = XAS_MAX_PAGES,
+    max_results: int = XAS_MAX_RESULTS,
+) -> tuple[DatasetCandidate, ...]:
     """Search fixed XAS terms, merge catalog hits, and rank declared evidence.
 
     The gateway supplies only parsed JSON from ``hyd search --json``.  This
     function deliberately reads catalog fields and small header evidence only;
     it never opens dataset files or archive members.
     """
-    observations: dict[str, list[tuple[str, Mapping[str, object]]]] = {}
+    return discover_xas_with_trace(
+        gateway,
+        page_limit=page_limit,
+        max_pages=max_pages,
+        max_results=max_results,
+    ).candidates
+
+
+def discover_xas_with_trace(
+    gateway: SearchGateway,
+    *,
+    page_limit: int = XAS_PAGE_LIMIT,
+    max_pages: int = XAS_MAX_PAGES,
+    max_results: int = XAS_MAX_RESULTS,
+) -> XasDiscoveryResult:
+    """Read every fixed-query page before exposing any ranked candidates."""
+
+    if type(page_limit) is not int or page_limit < 1:
+        raise ValueError("page_limit must be a positive integer")
+    if type(max_pages) is not int or max_pages < 1:
+        raise ValueError("max_pages must be a positive integer")
+    if type(max_results) is not int or max_results < 1:
+        raise ValueError("max_results must be a positive integer")
+
+    completed_records: list[tuple[str, tuple[Mapping[str, object], ...]]] = []
+    completion: list[QueryCompletion] = []
     for query in XAS_QUERIES:
-        for record in _records_from_result(gateway.search(query), query):
+        records, trace = _read_complete_query(
+            gateway,
+            query,
+            page_limit=page_limit,
+            max_pages=max_pages,
+            max_results=max_results,
+        )
+        completed_records.append((query, records))
+        completion.append(trace)
+
+    observations: dict[str, list[tuple[str, Mapping[str, object]]]] = {}
+    for query, records in completed_records:
+        for record in records:
             dataset_code = _optional_string(record.get("dataset_code"))
             if dataset_code is None:
                 continue
@@ -40,28 +115,110 @@ def discover_xas(gateway: SearchGateway) -> tuple[DatasetCandidate, ...]:
     )
     # Python's stable sort preserves first observed search order for exact
     # evidence ties. Dataset metadata is intentionally not a tie-breaker.
-    return tuple(sorted(candidates, key=lambda candidate: -_score(candidate)))
+    ranked = tuple(sorted(candidates, key=lambda candidate: -_score(candidate)))
+    return XasDiscoveryResult(candidates=ranked, completion=tuple(completion))
 
 
-def _records_from_result(
-    result: HydCommandResult, requested_query: str
-) -> tuple[Mapping[str, object], ...]:
+def _read_complete_query(
+    gateway: SearchGateway,
+    query: str,
+    *,
+    page_limit: int,
+    max_pages: int,
+    max_results: int,
+) -> tuple[tuple[Mapping[str, object], ...], QueryCompletion]:
+    records: list[Mapping[str, object]] = []
+    expected_total: int | None = None
+    for requested_page in range(1, max_pages + 1):
+        parsed = _page_from_result(
+            gateway.search(query, page=requested_page, limit=page_limit),
+            query,
+            requested_page=requested_page,
+            requested_limit=page_limit,
+        )
+        if parsed.legacy_complete:
+            if requested_page != 1:
+                raise HydIncompleteSearchError(
+                    "HyperData fixture paging changed before completion"
+                )
+            if len(parsed.records) > max_results:
+                raise HydIncompleteSearchError(
+                    "HyperData search exceeds the bounded result cap"
+                )
+            return parsed.records, QueryCompletion(
+                query=query, pages=1, total=len(parsed.records), records=len(parsed.records)
+            )
+        if expected_total is None:
+            expected_total = parsed.total
+            if expected_total > max_results:
+                raise HydIncompleteSearchError(
+                    "HyperData search exceeds the bounded result cap"
+                )
+        elif parsed.total != expected_total:
+            raise HydIncompleteSearchError(
+                "HyperData search total changed between pages"
+            )
+        records.extend(parsed.records)
+        if len(records) > max_results or len(records) > parsed.total:
+            raise HydIncompleteSearchError(
+                "HyperData search returned an inconsistent result count"
+            )
+        if not parsed.has_next:
+            if len(records) != parsed.total:
+                raise HydIncompleteSearchError(
+                    "HyperData search ended before its declared total"
+                )
+            return tuple(records), QueryCompletion(
+                query=query,
+                pages=requested_page,
+                total=parsed.total,
+                records=len(records),
+            )
+    raise HydIncompleteSearchError(
+        "HyperData search remains incomplete at the bounded page cap"
+    )
+
+
+def _page_from_result(
+    result: HydCommandResult,
+    requested_query: str,
+    *,
+    requested_page: int,
+    requested_limit: int,
+) -> _SearchPage:
     """Read only the pinned hyd wire envelope or exact internal fixture shape."""
     payload = result.payload
     if not isinstance(payload, Mapping):
         raise HydUnsupportedJsonError("HyperData search JSON must be an object")
     keys = set(payload)
     if keys == {"mode", "query", "data", "pagination"}:
-        return _records_from_hyd_envelope(payload, requested_query)
+        return _page_from_hyd_envelope(
+            payload,
+            requested_query,
+            requested_page=requested_page,
+            requested_limit=requested_limit,
+        )
     if keys == {"records"}:
         records = payload["records"]
-        return _require_object_array(records)
+        parsed = _require_object_array(records)
+        return _SearchPage(
+            records=parsed,
+            page=1,
+            limit=max(len(parsed), 1),
+            total=len(parsed),
+            has_next=False,
+            legacy_complete=True,
+        )
     raise HydUnsupportedJsonError("HyperData search JSON has an unsupported shape")
 
 
-def _records_from_hyd_envelope(
-    payload: Mapping[str, object], requested_query: str
-) -> tuple[Mapping[str, object], ...]:
+def _page_from_hyd_envelope(
+    payload: Mapping[str, object],
+    requested_query: str,
+    *,
+    requested_page: int,
+    requested_limit: int,
+) -> _SearchPage:
     """Validate hyperdata-client 84404d53's `search --ilike --json` shape."""
 
     if payload["mode"] != "ilike" or payload["query"] != requested_query:
@@ -73,6 +230,7 @@ def _records_from_hyd_envelope(
         "total",
         "page",
         "limit",
+        "next_cursor",
     }:
         raise HydUnsupportedJsonError("HyperData search data has an unsupported shape")
     if not isinstance(pagination, Mapping) or set(pagination) != {
@@ -90,20 +248,40 @@ def _records_from_hyd_envelope(
         or not _is_positive_int(data["limit"])
         or not _is_positive_int(pagination["page"])
         or not _is_positive_int(pagination["limit"])
-        or (
-            pagination["total"] is not None
-            and not _is_nonnegative_int(pagination["total"])
-        )
+        or not _is_nonnegative_int(pagination["total"])
         or type(pagination["has_next"]) is not bool
+        or (
+            data["next_cursor"] is not None
+            and not isinstance(data["next_cursor"], str)
+        )
     ):
         raise HydUnsupportedJsonError(
             "HyperData search pagination fields have invalid types or ranges"
         )
-    if data["page"] != pagination["page"] or data["limit"] != pagination["limit"]:
-        raise HydUnsupportedJsonError("HyperData search pagination is inconsistent")
-    if pagination["total"] is not None and data["total"] != pagination["total"]:
-        raise HydUnsupportedJsonError("HyperData search total is inconsistent")
-    return _require_object_array(data["items"])
+    if (
+        data["page"] != pagination["page"]
+        or data["limit"] != pagination["limit"]
+        or data["page"] != requested_page
+        or data["limit"] != requested_limit
+        or data["total"] != pagination["total"]
+    ):
+        raise HydIncompleteSearchError("HyperData search pagination is inconsistent")
+    records = _require_object_array(data["items"])
+    page = cast(int, data["page"])
+    limit = cast(int, data["limit"])
+    total = cast(int, data["total"])
+    has_next = pagination["has_next"]
+    if len(records) > limit or has_next != (page * limit < total):
+        raise HydIncompleteSearchError(
+            "HyperData search pagination cannot prove completeness"
+        )
+    return _SearchPage(
+        records=records,
+        page=page,
+        limit=limit,
+        total=total,
+        has_next=has_next,
+    )
 
 
 def _require_object_array(records: object) -> tuple[Mapping[str, object], ...]:

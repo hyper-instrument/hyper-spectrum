@@ -21,11 +21,12 @@ from hyperspectrum.hyperdata import (
     HydClientNotFoundError,
     HydCommandError,
     HydGateway,
+    HydIncompleteSearchError,
     HydTransportError,
     HydUnsupportedClientError,
     HydUnsupportedJsonError,
 )
-from hyperspectrum.hyperdata.discovery import XAS_QUERIES, discover_xas
+from hyperspectrum.hyperdata.discovery import XAS_QUERIES, discover_xas_with_trace
 from hyperspectrum.hyperdata.models import DatasetCandidate
 from hyperspectrum.process_boundary import redact_text, redact_value
 from hyperspectrum.registry import ResourceBudget, ToolRegistry, load_tool_manifest
@@ -102,6 +103,13 @@ class AgentMissingAssetError(AgentServiceError):
     exit_code = 4
 
 
+class AgentIncompleteSearchError(AgentServiceError):
+    """Catalog discovery stopped before every declared result was observed."""
+
+    error_code = "incomplete_search"
+    exit_code = 4
+
+
 class AgentExecutionError(AgentServiceError):
     """An admitted execution failed."""
 
@@ -138,13 +146,17 @@ def discover_data(modality: str, profile: str) -> ServiceResponse:
     if not profile.strip():
         raise AgentRequestError("profile must be a non-blank name")
     try:
-        candidates = discover_xas(HydGateway(profile=profile))
+        discovery = discover_xas_with_trace(HydGateway(profile=profile))
     except HydAuthenticationError as error:
         raise AgentAuthError(str(error)) from error
     except HydTransportError as error:
         raise AgentAuthError(str(error)) from error
     except HydCommandError as error:
         raise AgentExecutionError(str(error)) from error
+    except HydIncompleteSearchError as error:
+        raise AgentIncompleteSearchError(
+            str(error), result={"complete": False, "candidates": []}
+        ) from error
     except (
         HydClientNotFoundError,
         HydUnsupportedClientError,
@@ -156,8 +168,20 @@ def discover_data(modality: str, profile: str) -> ServiceResponse:
             "modality": "xas",
             "profile": profile,
             "queries": list(XAS_QUERIES),
+            "completion": {
+                "complete": True,
+                "queries": [
+                    {
+                        "query": trace.query,
+                        "pages": trace.pages,
+                        "total": trace.total,
+                        "records": trace.records,
+                    }
+                    for trace in discovery.completion
+                ],
+            },
             "candidates": [
-                candidate.model_dump(mode="json") for candidate in candidates
+                candidate.model_dump(mode="json") for candidate in discovery.candidates
             ],
         }
     )

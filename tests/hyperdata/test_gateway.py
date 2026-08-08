@@ -61,7 +61,9 @@ def test_search_uses_the_json_contract_and_freezes_last_json_payload(
         )
     )
 
-    result = HydGateway(profile="volcano", timeout=12.5, runner=runner).search("iron edge")
+    result = HydGateway(profile="volcano", timeout=12.5, runner=runner).search(
+        "iron edge", page=3, limit=17
+    )
 
     assert result.argv == (
         "hyd",
@@ -69,8 +71,12 @@ def test_search_uses_the_json_contract_and_freezes_last_json_payload(
         "volcano",
         "search",
         "iron edge",
-        "--ilike",
+        "--limit",
+        "17",
+        "--page",
+        "3",
         "--json",
+        "--ilike",
     )
     assert result.payload["records"][0]["id"] == "xas-001"  # type: ignore[index]
     with pytest.raises(AttributeError):
@@ -93,7 +99,7 @@ def test_missing_hyd_binary_has_a_stable_absent_cli_code() -> None:
     runner = RecordingRunner(FileNotFoundError("hyd was not found"))
 
     with pytest.raises(HydClientNotFoundError) as error:
-        HydGateway(runner=runner).search("iron")
+        HydGateway(runner=runner).search("iron", page=1, limit=20)
 
     assert error.value.code == "absent_cli"
 
@@ -111,7 +117,9 @@ def test_unauthenticated_profile_redacts_bearer_tokens() -> None:
     )
 
     with pytest.raises(HydAuthenticationError) as error:
-        HydGateway(profile="volcano", runner=runner).search("iron")
+        HydGateway(profile="volcano", runner=runner).search(
+            "iron", page=1, limit=20
+        )
 
     assert error.value.code == "unauthenticated_profile"
     assert "ultra-secret-token" not in str(error.value)
@@ -124,11 +132,21 @@ def test_unknown_search_command_is_an_unsupported_client_without_legacy_fallback
     runner = RecordingRunner(completed(returncode=2, stderr='unknown command "search"'))
 
     with pytest.raises(HydUnsupportedClientError) as error:
-        HydGateway(runner=runner).search("iron")
+        HydGateway(runner=runner).search("iron", page=1, limit=20)
 
     assert error.value.code == "unsupported_client"
     assert [call[0] for call in runner.calls] == [
-        ("hyd", "search", "iron", "--ilike", "--json")
+        (
+            "hyd",
+            "search",
+            "iron",
+            "--limit",
+            "20",
+            "--page",
+            "1",
+            "--json",
+            "--ilike",
+        )
     ]
 
 
@@ -259,9 +277,33 @@ def test_resolved_custom_client_path_remains_usable() -> None:
         binary="custom-hyd",
         runner=runner,
         executable_resolver=lambda _candidate: "/opt/tools/custom-hyd",
-    ).search("iron")
+    ).search("iron", page=1, limit=20)
 
-    assert result.argv == ("custom-hyd", "search", "iron", "--ilike", "--json")
+    assert result.argv == (
+        "custom-hyd",
+        "search",
+        "iron",
+        "--limit",
+        "20",
+        "--page",
+        "1",
+        "--json",
+        "--ilike",
+    )
+
+
+@pytest.mark.parametrize(("page", "limit"), ((0, 20), (True, 20), (1, 0), (1, False)))
+def test_search_rejects_invalid_paging_before_process_execution(
+    page: object, limit: object
+) -> None:
+    runner = RecordingRunner(completed(stdout='{"records": []}\n'))
+
+    with pytest.raises(ValueError):
+        HydGateway(runner=runner).search(  # type: ignore[arg-type]
+            "iron", page=page, limit=limit
+        )
+
+    assert runner.calls == []
 
 
 @pytest.mark.parametrize(
@@ -276,7 +318,7 @@ def test_non_json_output_fails_closed(stdout: str) -> None:
     runner = RecordingRunner(completed(stdout=stdout))
 
     with pytest.raises(HydUnsupportedJsonError) as error:
-        HydGateway(runner=runner).search("iron")
+        HydGateway(runner=runner).search("iron", page=1, limit=20)
 
     assert error.value.code == "unsupported_json"
 
@@ -286,6 +328,6 @@ def test_timeout_is_a_transport_failure() -> None:
     runner = RecordingRunner(subprocess.TimeoutExpired(cmd=("hyd",), timeout=3))
 
     with pytest.raises(HydTransportError) as error:
-        HydGateway(runner=runner).search("iron")
+        HydGateway(runner=runner).search("iron", page=1, limit=20)
 
     assert error.value.code == "transport_failure"

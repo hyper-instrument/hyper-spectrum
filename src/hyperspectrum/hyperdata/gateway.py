@@ -103,6 +103,12 @@ class HydUnsupportedJsonError(HydGatewayError):
     code = "unsupported_json"
 
 
+class HydIncompleteSearchError(HydGatewayError):
+    """Raised when catalog paging cannot prove that the search is complete."""
+
+    code = "incomplete_search"
+
+
 class HydTransportError(HydGatewayError):
     """Raised when the command cannot complete as a process transport operation."""
 
@@ -181,11 +187,26 @@ class HydGateway:
             payload=payload,
         )
 
-    def search(self, query: str) -> HydCommandResult:
+    def search(self, query: str, *, page: int, limit: int) -> HydCommandResult:
         """Search using only the current JSON search contract, never table scraping."""
         if not isinstance(query, str):
             raise TypeError("search query must be a string")
-        return self.run(("search", query, "--ilike", "--json"))
+        if type(page) is not int or page < 1:
+            raise ValueError("search page must be a positive integer")
+        if type(limit) is not int or limit < 1:
+            raise ValueError("search limit must be a positive integer")
+        return self.run(
+            (
+                "search",
+                query,
+                "--limit",
+                str(limit),
+                "--page",
+                str(page),
+                "--json",
+                "--ilike",
+            )
+        )
 
     def _profile_args(self) -> tuple[str, ...]:
         if self._profile is None:

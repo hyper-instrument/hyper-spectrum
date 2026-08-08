@@ -6,8 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from hyperspectrum.hyperdata.discovery import XAS_QUERIES, discover_xas
-from hyperspectrum.hyperdata.gateway import HydUnsupportedJsonError
+from hyperspectrum.hyperdata.discovery import (
+    XAS_QUERIES,
+    discover_xas,
+    discover_xas_with_trace,
+)
+from hyperspectrum.hyperdata.gateway import (
+    HydIncompleteSearchError,
+    HydUnsupportedJsonError,
+)
 from hyperspectrum.hyperdata.models import HydCommandResult
 
 FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "hyperdata" / "xas-search.json"
@@ -26,10 +33,13 @@ class FixtureGateway:
         self.records_by_query = records_by_query
         self.queries: list[str] = []
 
-    def search(self, query: str) -> HydCommandResult:
+    def search(
+        self, query: str, *, page: int = 1, limit: int = 20
+    ) -> HydCommandResult:
         self.queries.append(query)
+        assert page == 1
         return HydCommandResult(
-            argv=("hyd", "search", query, "--ilike", "--json"),
+            argv=("hyd", "search", query, "--limit", str(limit), "--page", "1"),
             returncode=0,
             stdout="",
             stderr="",
@@ -43,28 +53,41 @@ class EnvelopeGateway:
     def __init__(self, payloads_by_query: Mapping[str, object]) -> None:
         self.payloads_by_query = payloads_by_query
         self.queries: list[str] = []
+        self.calls: list[tuple[str, int, int]] = []
 
-    def search(self, query: str) -> HydCommandResult:
+    def search(
+        self, query: str, *, page: int = 1, limit: int = 20
+    ) -> HydCommandResult:
         self.queries.append(query)
+        self.calls.append((query, page, limit))
+        keyed_payloads = self.payloads_by_query  # keep old one-page fixtures concise
+        payload = keyed_payloads.get(f"{query}:{page}")
+        if payload is None and page == 1:
+            payload = keyed_payloads.get(query)
+        if payload is None:
+            payload = {
+                "mode": "ilike",
+                "query": query,
+                "data": {
+                    "items": [],
+                    "total": 0,
+                    "page": page,
+                    "limit": limit,
+                    "next_cursor": None,
+                },
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": 0,
+                    "has_next": False,
+                },
+            }
         return HydCommandResult(
-            argv=("hyd", "search", query, "--ilike", "--json"),
+            argv=("hyd", "search", query, "--limit", str(limit), "--page", str(page)),
             returncode=0,
             stdout="",
             stderr="",
-            payload=self.payloads_by_query.get(
-                query,
-                {
-                    "mode": "ilike",
-                    "query": query,
-                    "data": {"items": [], "total": 0, "page": 1, "limit": 20},
-                    "pagination": {
-                        "page": 1,
-                        "limit": 20,
-                        "total": 0,
-                        "has_next": False,
-                    },
-                },
-            ),
+            payload=payload,
         )
 
 
@@ -109,19 +132,37 @@ def test_discovery_retains_records_envelope_compatibility() -> None:
         {
             "mode": "dataset",
             "query": "XAS",
-            "data": {"items": [], "total": 0, "page": 1, "limit": 20},
+            "data": {
+                "items": [],
+                "total": 0,
+                "page": 1,
+                "limit": 20,
+                "next_cursor": None,
+            },
             "pagination": {"page": 1, "limit": 20, "total": 0, "has_next": False},
         },
         {
             "mode": "ilike",
             "query": "XANES",
-            "data": {"items": [], "total": 0, "page": 1, "limit": 20},
+            "data": {
+                "items": [],
+                "total": 0,
+                "page": 1,
+                "limit": 20,
+                "next_cursor": None,
+            },
             "pagination": {"page": 1, "limit": 20, "total": 0, "has_next": False},
         },
         {
             "mode": "ilike",
             "query": "XAS",
-            "data": {"items": [42], "total": 1, "page": 1, "limit": 20},
+            "data": {
+                "items": [42],
+                "total": 1,
+                "page": 1,
+                "limit": 20,
+                "next_cursor": None,
+            },
             "pagination": {"page": 1, "limit": 20, "total": 1, "has_next": False},
         },
         {"records": {}},
@@ -129,7 +170,13 @@ def test_discovery_retains_records_envelope_compatibility() -> None:
         {
             "mode": "ilike",
             "query": "XAS",
-            "data": {"items": [], "total": 0, "page": 1, "limit": 20},
+            "data": {
+                "items": [],
+                "total": 0,
+                "page": 1,
+                "limit": 20,
+                "next_cursor": None,
+            },
             "pagination": {"page": 1, "limit": 20, "total": 0, "has_next": False},
             "records": [],
         },
@@ -157,7 +204,24 @@ def test_discovery_rejects_unknown_json_shapes(payload: object) -> None:
                 "extra": True,
             }
         },
-        {"data": {"items": [], "total": True, "page": 1, "limit": 20}},
+        {
+            "data": {
+                "items": [],
+                "total": True,
+                "page": 1,
+                "limit": 20,
+                "next_cursor": None,
+            }
+        },
+        {
+            "data": {
+                "items": [],
+                "total": 0,
+                "page": 1,
+                "limit": 20,
+                "next_cursor": 42,
+            }
+        },
         {"pagination": {"page": 1, "limit": 20, "total": 0}},
         {
             "pagination": {
@@ -199,12 +263,18 @@ def test_discovery_rejects_invalid_real_hyd_pagination_contract(
     payload: dict[str, object] = {
         "mode": "ilike",
         "query": "XAS",
-        "data": {"items": [], "total": 0, "page": 1, "limit": 20},
+        "data": {
+            "items": [],
+            "total": 0,
+            "page": 1,
+            "limit": 20,
+            "next_cursor": None,
+        },
         "pagination": {"page": 1, "limit": 20, "total": 0, "has_next": False},
     }
     payload.update(change)
 
-    with pytest.raises(HydUnsupportedJsonError):
+    with pytest.raises((HydUnsupportedJsonError, HydIncompleteSearchError)):
         discover_xas(EnvelopeGateway({"XAS": payload}))
 
 
@@ -214,15 +284,179 @@ def test_discovery_allows_empty_data_only_in_the_exact_real_envelope() -> None:
     assert candidates == ()
 
 
-def test_discovery_allows_documented_null_pagination_total() -> None:
+def test_discovery_rejects_null_pagination_total() -> None:
     payload = {
         "mode": "ilike",
         "query": "XAS",
-        "data": {"items": [], "total": 0, "page": 1, "limit": 20},
+        "data": {
+            "items": [],
+            "total": 0,
+            "page": 1,
+            "limit": 20,
+            "next_cursor": None,
+        },
         "pagination": {"page": 1, "limit": 20, "total": None, "has_next": False},
     }
 
-    assert discover_xas(EnvelopeGateway({"XAS": payload})) == ()
+    with pytest.raises(HydUnsupportedJsonError):
+        discover_xas(EnvelopeGateway({"XAS": payload}))
+
+
+def hyd_page(
+    query: str,
+    *,
+    page: int,
+    total: int,
+    items: list[dict[str, object]],
+    limit: int = 20,
+) -> dict[str, object]:
+    return {
+        "mode": "ilike",
+        "query": query,
+        "data": {
+            "items": items,
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "next_cursor": f"cursor-{page + 1}" if page * limit < total else None,
+        },
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "has_next": page * limit < total,
+        },
+    }
+
+
+def test_discovery_reads_page_two_before_ranking_and_reports_completion() -> None:
+    record = json.loads(DATA_ENVELOPE_FIXTURE_PATH.read_text(encoding="utf-8"))["data"][
+        "items"
+    ][0]
+    gateway = EnvelopeGateway(
+        {
+            "XAS:1": hyd_page("XAS", page=1, total=21, items=[{} for _ in range(20)]),
+            "XAS:2": hyd_page("XAS", page=2, total=21, items=[record]),
+        }
+    )
+
+    result = discover_xas_with_trace(gateway)
+
+    assert [candidate.dataset_code for candidate in result.candidates] == [
+        "public-real-envelope-xas"
+    ]
+    assert result.completion[0].query == "XAS"
+    assert result.completion[0].pages == 2
+    assert result.completion[0].total == result.completion[0].records == 21
+    assert gateway.calls[:2] == [("XAS", 1, 20), ("XAS", 2, 20)]
+
+
+def test_discovery_refuses_partial_first_page_at_page_cap() -> None:
+    gateway = EnvelopeGateway(
+        {
+            "XAS:1": hyd_page(
+                "XAS", page=1, total=21, items=[{} for _ in range(20)]
+            )
+        }
+    )
+
+    with pytest.raises(HydIncompleteSearchError) as captured:
+        discover_xas(gateway, max_pages=1)
+
+    assert captured.value.code == "incomplete_search"
+    assert gateway.calls == [("XAS", 1, 20)]
+
+
+def test_discovery_refuses_declared_total_above_result_cap() -> None:
+    gateway = EnvelopeGateway(
+        {
+            "XAS:1": hyd_page(
+                "XAS", page=1, total=21, items=[{} for _ in range(20)]
+            )
+        }
+    )
+
+    with pytest.raises(HydIncompleteSearchError) as captured:
+        discover_xas(gateway, max_results=20)
+
+    assert captured.value.code == "incomplete_search"
+    assert gateway.calls == [("XAS", 1, 20)]
+
+
+@pytest.mark.parametrize(
+    "bounds",
+    (
+        {"page_limit": 0},
+        {"page_limit": True},
+        {"max_pages": 0},
+        {"max_pages": False},
+        {"max_results": 0},
+        {"max_results": True},
+    ),
+)
+def test_discovery_rejects_invalid_public_bounds_before_search(
+    bounds: dict[str, object],
+) -> None:
+    gateway = EnvelopeGateway({})
+
+    with pytest.raises(ValueError):
+        discover_xas(gateway, **bounds)  # type: ignore[arg-type]
+
+    assert gateway.calls == []
+
+
+def test_discovery_refuses_total_drift_without_partial_candidates() -> None:
+    gateway = EnvelopeGateway(
+        {
+            "XAS:1": hyd_page(
+                "XAS", page=1, total=21, items=[{} for _ in range(20)]
+            ),
+            "XAS:2": hyd_page("XAS", page=2, total=22, items=[{} , {}]),
+        }
+    )
+
+    with pytest.raises(HydIncompleteSearchError) as captured:
+        discover_xas_with_trace(gateway)
+
+    assert captured.value.code == "incomplete_search"
+
+
+def test_discovery_refuses_wrong_has_next_instead_of_stopping_at_twenty() -> None:
+    payload = hyd_page("XAS", page=1, total=21, items=[{} for _ in range(20)])
+    payload["pagination"]["has_next"] = False  # type: ignore[index]
+
+    with pytest.raises(HydIncompleteSearchError) as captured:
+        discover_xas(EnvelopeGateway({"XAS": payload}))
+
+    assert captured.value.code == "incomplete_search"
+
+
+def test_discovery_rejects_missing_real_next_cursor_field() -> None:
+    payload = hyd_page("XAS", page=1, total=0, items=[])
+    del payload["data"]["next_cursor"]  # type: ignore[index]
+
+    with pytest.raises(HydUnsupportedJsonError) as captured:
+        discover_xas(EnvelopeGateway({"XAS": payload}))
+
+    assert captured.value.code == "unsupported_json"
+
+
+def test_discovery_rejects_page_larger_than_requested_limit() -> None:
+    payload = hyd_page("XAS", page=1, total=2, items=[{}, {}], limit=1)
+
+    with pytest.raises(HydIncompleteSearchError) as captured:
+        discover_xas(EnvelopeGateway({"XAS": payload}), page_limit=1)
+
+    assert captured.value.code == "incomplete_search"
+
+
+def test_discovery_empty_complete_response_has_explicit_trace() -> None:
+    result = discover_xas_with_trace(EnvelopeGateway({}))
+
+    assert result.candidates == ()
+    assert [(trace.query, trace.pages, trace.total, trace.records) for trace in result.completion] == [
+        (query, 1, 0, 0) for query in XAS_QUERIES
+    ]
 
 
 def test_discovery_deduplicates_catalog_hits_and_retains_search_evidence() -> None:

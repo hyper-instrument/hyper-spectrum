@@ -12,6 +12,7 @@ from hyperspectrum.hyperdata import (
     HydAuthenticationError,
     HydClientNotFoundError,
     HydCommandError,
+    HydIncompleteSearchError,
     HydTransportError,
     HydUnsupportedClientError,
     HydUnsupportedJsonError,
@@ -91,7 +92,10 @@ def test_discovery_uses_only_the_public_gateway_contract(
         def __init__(self, *, profile: str) -> None:
             constructed.append(profile)
 
-        def search(self, query: str) -> HydCommandResult:
+        def search(
+            self, query: str, *, page: int = 1, limit: int = 20
+        ) -> HydCommandResult:
+            assert (page, limit) == (1, 20)
             return HydCommandResult(
                 argv=("hyd", "search", query, "--json"),
                 returncode=0,
@@ -108,6 +112,13 @@ def test_discovery_uses_only_the_public_gateway_contract(
         "modality": "xas",
         "profile": "volcano",
         "queries": ["XAS", "XANES", "EXAFS", "absorption edge"],
+        "completion": {
+            "complete": True,
+            "queries": [
+                {"query": query, "pages": 1, "total": 0, "records": 0}
+                for query in ("XAS", "XANES", "EXAFS", "absorption edge")
+            ],
+        },
         "candidates": [],
     }
     assert constructed == ["volcano"]
@@ -120,7 +131,10 @@ def test_discovery_maps_authentication_failure_without_fallback(
         def __init__(self, *, profile: str) -> None:
             _ = profile
 
-        def search(self, query: str) -> HydCommandResult:
+        def search(
+            self, query: str, *, page: int = 1, limit: int = 20
+        ) -> HydCommandResult:
+            _ = page, limit
             raise HydAuthenticationError(f"{query}: login required")
 
     monkeypatch.setattr(agent, "HydGateway", Gateway)
@@ -137,6 +151,7 @@ def test_discovery_maps_authentication_failure_without_fallback(
         (HydClientNotFoundError("missing"), agent.AgentMissingAssetError, 4),
         (HydUnsupportedClientError("unsupported"), agent.AgentMissingAssetError, 4),
         (HydUnsupportedJsonError("bad json"), agent.AgentMissingAssetError, 4),
+        (HydIncompleteSearchError("partial"), agent.AgentIncompleteSearchError, 4),
         (HydCommandError("command failed"), agent.AgentExecutionError, 5),
     ],
 )
@@ -150,7 +165,10 @@ def test_discovery_maps_each_gateway_failure_category(
         def __init__(self, *, profile: str) -> None:
             _ = profile
 
-        def search(self, query: str) -> HydCommandResult:
+        def search(
+            self, query: str, *, page: int = 1, limit: int = 20
+        ) -> HydCommandResult:
+            _ = query, page, limit
             raise gateway_error
 
     monkeypatch.setattr(agent, "HydGateway", Gateway)
@@ -159,6 +177,9 @@ def test_discovery_maps_each_gateway_failure_category(
         agent.discover_data("xas", "volcano")
 
     assert captured.value.exit_code == exit_code
+    if isinstance(gateway_error, HydIncompleteSearchError):
+        assert captured.value.error_code == "incomplete_search"
+        assert captured.value.result == {"complete": False, "candidates": []}
 
 
 def test_recommendation_reads_one_declared_candidate_file(tmp_path: Path) -> None:

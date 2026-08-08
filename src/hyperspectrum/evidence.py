@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -13,6 +14,14 @@ from jsonschema import Draft202012Validator
 from hyperspectrum.process_boundary import redact_value
 
 _URL_LOCATOR = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>{}\[\]\"']+")
+_HOST_PORT_LOCATOR = re.compile(
+    r"(?i)(?<![a-z0-9_.-])"
+    r"(?:[a-z](?:[a-z0-9.-]*[a-z0-9])?):[1-9][0-9]{0,4}(?![0-9])"
+)
+_IPV4_TOKEN = re.compile(r"(?<![a-z0-9_.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![a-z0-9_.])")
+_IPV6_TOKEN = re.compile(
+    r"\[?[0-9a-f:.]+(?:%[a-z0-9_.-]+)?\]?", re.IGNORECASE
+)
 
 
 class XasM0EvidenceError(ValueError):
@@ -56,6 +65,10 @@ def validate_xas_m0_evidence(value: object) -> dict[str, Any]:
         raise XasM0EvidenceError(
             "locator_forbidden", "XAS M0 evidence contains a URL locator"
         )
+    if _contains_endpoint_locator(detached):
+        raise XasM0EvidenceError(
+            "locator_forbidden", "XAS M0 evidence contains an endpoint locator"
+        )
     _validate_provenance_chain(detached)
     _validate_count_chain(detached)
     return cast(dict[str, Any], detached)
@@ -84,6 +97,43 @@ def _contains_url_locator(value: object) -> bool:
         value, (str, bytes, bytearray)
     ):
         return any(_contains_url_locator(item) for item in value)
+    return False
+
+
+def _contains_endpoint_locator(value: object) -> bool:
+    """Detect non-URL host/port and private IPv6 locators in semantic text."""
+
+    if isinstance(value, str):
+        if _HOST_PORT_LOCATOR.search(value) is not None:
+            return True
+        for match in _IPV4_TOKEN.finditer(value):
+            try:
+                ipaddress.IPv4Address(match.group(0))
+            except ValueError:
+                continue
+            return True
+        for match in _IPV6_TOKEN.finditer(value):
+            token = match.group(0).strip("[]")
+            if ":" not in token:
+                continue
+            address_text = token.split("%", 1)[0]
+            try:
+                address = ipaddress.ip_address(address_text)
+            except ValueError:
+                continue
+            if isinstance(address, ipaddress.IPv6Address):
+                return True
+        return False
+    if isinstance(value, Mapping):
+        return any(
+            _contains_endpoint_locator(str(key))
+            or _contains_endpoint_locator(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        return any(_contains_endpoint_locator(item) for item in value)
     return False
 
 

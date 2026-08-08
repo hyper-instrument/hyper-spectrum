@@ -292,13 +292,23 @@ def test_process_boundary_preserves_public_url_without_credentials() -> None:
     }
 
 
-def test_process_boundary_redacts_single_label_private_url_host() -> None:
-    private_url = "http://compute-node:8080/private/input"
-
-    rendered = redact_text(private_url)
-
-    assert "compute-node" not in rendered
-    assert "http://" in rendered
+@pytest.mark.parametrize(
+    "public_locator",
+    (
+        "s3://public-bucket/xas/input.npz",
+        "gs://public-bucket/xas/input.npz",
+        "hyperdata://dataset/v1/spectrum",
+        "https://compute-node:8080/public/input",
+        "https://catalog.example.org/public/xas-dataset",
+    ),
+)
+def test_process_boundary_preserves_credential_free_public_locators(
+    public_locator: str,
+) -> None:
+    assert redact_text(public_locator) == public_locator
+    assert agent.ServiceResponse(result={"locator": public_locator}).result == {
+        "locator": public_locator
+    }
 
 
 def test_real_cli_refuses_legacy_v1_plan_with_migration_message(

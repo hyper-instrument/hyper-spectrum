@@ -14,6 +14,7 @@ from hyperspectrum import cli
 from hyperspectrum.agent import (
     AgentAuthError,
     AgentExecutionError,
+    AgentIncompleteSearchError,
     AgentMissingAssetError,
     AgentRequestError,
     ServiceResponse,
@@ -77,7 +78,17 @@ def test_data_discover_forwards_modality_and_profile(
 
     def fake_discover(modality: str, profile: str) -> ServiceResponse:
         calls.append((modality, profile))
-        return payload({"candidates": [{"dataset_code": "XAS-1"}]})
+        return payload(
+            {
+                "completion": {
+                    "complete": True,
+                    "queries": [
+                        {"query": "XAS", "pages": 2, "total": 21, "records": 21}
+                    ],
+                },
+                "candidates": [{"dataset_code": "XAS-1"}],
+            }
+        )
 
     monkeypatch.setattr(cli.services, "discover_data", fake_discover)
 
@@ -90,7 +101,15 @@ def test_data_discover_forwards_modality_and_profile(
     assert_envelope(
         result,
         ok=True,
-        expected_result={"candidates": [{"dataset_code": "XAS-1"}]},
+        expected_result={
+            "completion": {
+                "complete": True,
+                "queries": [
+                    {"query": "XAS", "pages": 2, "total": 21, "records": 21}
+                ],
+            },
+            "candidates": [{"dataset_code": "XAS-1"}],
+        },
     )
     assert calls == [("xas", "volcano")]
 
@@ -246,6 +265,13 @@ def test_run_local_forwards_plan_source_and_sample_ids(
         (AgentRequestError("not ready"), 2, "invalid_or_not_ready"),
         (AgentAuthError("login required"), 3, "auth_or_connection"),
         (AgentMissingAssetError("tool missing"), 4, "missing_asset_or_tool"),
+        (
+            AgentIncompleteSearchError(
+                "partial", result={"complete": False, "candidates": []}
+            ),
+            4,
+            "incomplete_search",
+        ),
         (AgentExecutionError("run failed"), 5, "execution_failure"),
     ],
 )
@@ -263,7 +289,12 @@ def test_agent_errors_map_to_stable_exit_codes_and_one_json_envelope(
     result = runner.invoke(cli.app, ["doctor", "--json"])
 
     assert result.exit_code == exit_code
-    parsed = assert_envelope(result, ok=False)
+    expected_result = (
+        {"complete": False, "candidates": []}
+        if error_code == "incomplete_search"
+        else None
+    )
+    parsed = assert_envelope(result, ok=False, expected_result=expected_result)
     assert parsed["error"] == {"code": error_code, "message": str(error)}
     assert result.stderr == f"{error}\n"
 

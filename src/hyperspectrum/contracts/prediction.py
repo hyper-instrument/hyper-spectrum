@@ -107,12 +107,17 @@ class PredictionBundleV2(_PredictionBundleBase):
     def require_v2_provenance(cls, value: FrozenJsonMapping) -> FrozenJsonMapping:
         for key in _V2_SHA256_DIGESTS:
             digest = value.get(key)
-            if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
+            if (
+                not isinstance(digest, str)
+                or _SHA256.fullmatch(digest) is None
+                or digest == "0" * 64
+            ):
                 raise ValueError(f"provenance {key} must be a lowercase SHA-256")
         weight_digest = value.get("weight_digest")
         if weight_digest != "none" and (
             not isinstance(weight_digest, str)
             or _SHA256.fullmatch(weight_digest) is None
+            or weight_digest == "0" * 64
         ):
             raise ValueError(
                 "provenance weight_digest must be 'none' or a lowercase SHA-256"

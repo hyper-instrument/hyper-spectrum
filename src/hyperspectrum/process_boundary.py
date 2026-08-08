@@ -41,9 +41,6 @@ _QUOTED_KEY_VALUE = re.compile(
 )
 _QUERY_VALUE = re.compile(r"([?&])([^=&#\s]+)(=)([^&#\s]*)")
 _URL_USERINFO = re.compile(r"(?i)(://)[^/@\s]+@")
-_SINGLE_LABEL_URL_HOST = re.compile(
-    r"(?i)(?P<scheme>://)(?P<host>localhost|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)(?=[:/])"
-)
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"(?i)\b[a-z]:\\(?:[^\\\s]+\\)*[^\\\s]+")
 _UNC_ABSOLUTE_PATH = re.compile(r"(?<!\\)\\\\(?:[^\\\s]+\\)+[^\\\s]+")
 _POSIX_ABSOLUTE_PATH = re.compile(
@@ -76,7 +73,6 @@ def redact_text(value: str) -> str:
         for line in value.splitlines(keepends=True)
     )
     redacted = _URL_USERINFO.sub(r"\1[REDACTED]@", redacted)
-    redacted = _SINGLE_LABEL_URL_HOST.sub(r"\g<scheme>[REDACTED]", redacted)
     redacted = _WINDOWS_ABSOLUTE_PATH.sub(_REDACTED, redacted)
     redacted = _UNC_ABSOLUTE_PATH.sub(_REDACTED, redacted)
     redacted = _POSIX_ABSOLUTE_PATH.sub(_REDACTED, redacted)

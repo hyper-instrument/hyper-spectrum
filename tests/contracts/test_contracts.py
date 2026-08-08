@@ -222,6 +222,33 @@ def test_prediction_v2_rejects_missing_required_provenance_field() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "field",
+    (
+        "model_digest",
+        "tool_digest",
+        "implementation_digest",
+        "weight_digest",
+        "data_digest",
+        "environment_digest",
+        "plan_digest",
+    ),
+)
+def test_prediction_v2_rejects_all_zero_sha256_sentinels(field: str) -> None:
+    provenance = prediction_v2_provenance()
+    provenance[field] = "0" * 64
+
+    with pytest.raises(ValidationError, match=field):
+        PredictionBundleV2(
+            schema_version="hyperspectrum-prediction/v2",
+            run_id="run-v2",
+            task_id="xas-denoising",
+            predictions=(artifact(role="prediction"),),
+            failures=(),
+            provenance=provenance,
+        )
+
+
 def test_contract_instances_are_frozen() -> None:
     instance = axis()
 

@@ -201,6 +201,29 @@ def test_schema_accepts_a_large_full_split_with_an_eight_sample_smoke(
 
 
 @pytest.mark.parametrize(
+    "field",
+    (
+        "plan_digest",
+        "model_digest",
+        "tool_digest",
+        "implementation_digest",
+        "weight_digest",
+        "data_digest",
+        "environment_digest",
+        "dataset_digest",
+    ),
+)
+def test_success_schema_rejects_all_zero_smoke_provenance_digests(
+    valid_evidence: dict[str, Any], field: str
+) -> None:
+    invalid = copy.deepcopy(valid_evidence)
+    invalid["smoke_run"]["provenance"][field] = "0" * 64
+
+    with pytest.raises(ValidationError):
+        _validator().validate(invalid)
+
+
+@pytest.mark.parametrize(
     "field", ["id", "file_count", "sample_count", "source"]
 )
 def test_schema_requires_full_benchmark_split_counts_and_source(

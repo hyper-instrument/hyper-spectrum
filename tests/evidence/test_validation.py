@@ -65,6 +65,37 @@ def test_public_url_locator_reaches_the_structural_redaction_gate() -> None:
     assert captured.value.code == "locator_forbidden"
 
 
+@pytest.mark.parametrize(
+    "private_locator",
+    (
+        "compute-node:8080",
+        "database.corp:5432",
+        "8.8.8.8:53",
+        "1.1.1.1:443",
+        "fd00::1",
+        "fc00::1234",
+        "fe80::1",
+        "fe80::1%en0",
+        "::1",
+        "::ffff:8.8.8.8",
+        "2001:4860:4860::8888",
+        "[2001:4860:4860::8888]:443",
+        "[fe80::1%en0]:8080",
+    ),
+)
+def test_semantic_validator_rejects_endpoint_locators_without_echoing_input(
+    private_locator: str,
+) -> None:
+    evidence = make_valid_evidence()
+    evidence["dataset"]["description"] = private_locator
+
+    with pytest.raises(XasM0EvidenceError) as captured:
+        validate_xas_m0_evidence(evidence)
+
+    assert captured.value.code == "locator_forbidden"
+    assert private_locator not in str(captured.value)
+
+
 def test_semantic_validator_checks_schema_before_redaction() -> None:
     evidence = make_valid_evidence()
     evidence["unexpected"] = "PASSWORD=SCHEMA_FIRST_LITERAL"
