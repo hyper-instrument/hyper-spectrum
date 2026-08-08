@@ -80,7 +80,9 @@ class RuntimeSpec(BaseModel):
     @model_validator(mode="after")
     def require_image_for_container(self) -> RuntimeSpec:
         if self.kind == "container" and self.image is None:
-            raise ValueError("container runtime requires an image pinned by an immutable digest")
+            raise ValueError(
+                "container runtime requires an image pinned by an immutable digest"
+            )
         return self
 
 
@@ -131,19 +133,31 @@ class SourceSpec(BaseModel):
             if (self.commit is None) == (self.release is None):
                 raise ValueError("git source requires exactly one commit or release")
             if self.commit is not None and _GIT_COMMIT.fullmatch(self.commit) is None:
-                raise ValueError("source commit must be a 40-character lowercase Git commit")
-            if self.release is not None and _RELEASE_VERSION.fullmatch(self.release) is None:
+                raise ValueError(
+                    "source commit must be a 40-character lowercase Git commit"
+                )
+            if (
+                self.release is not None
+                and _RELEASE_VERSION.fullmatch(self.release) is None
+            ):
                 raise ValueError("source release must be an immutable release version")
             return self
 
         if not self.package or not self.version or not self.revision:
-            raise ValueError("local-package source requires package, version, and revision")
+            raise ValueError(
+                "local-package source requires package, version, and revision"
+            )
         if _RELEASE_VERSION.fullmatch(self.version) is None:
-            raise ValueError("local-package source version must be an immutable release version")
-        if _GIT_COMMIT.fullmatch(self.revision) is None and _RELEASE_VERSION.fullmatch(
-            self.revision
-        ) is None:
-            raise ValueError("local-package source revision must be an immutable revision")
+            raise ValueError(
+                "local-package source version must be an immutable release version"
+            )
+        if (
+            _GIT_COMMIT.fullmatch(self.revision) is None
+            and _RELEASE_VERSION.fullmatch(self.revision) is None
+        ):
+            raise ValueError(
+                "local-package source revision must be an immutable revision"
+            )
         return self
 
 
@@ -198,7 +212,7 @@ class ToolManifest(BaseModel):
     runtime: RuntimeSpec
     entrypoint: str
     inputs: tuple[ArtifactSpec, ...]
-    outputs: tuple[ArtifactSpec, ...]
+    outputs: tuple[ArtifactSpec, ...] = Field(min_length=1)
     resources: ResourceRequirements
     verify: tuple[str, ...] = Field(min_length=1)
     source: SourceSpec
@@ -217,7 +231,9 @@ class ToolManifest(BaseModel):
     @field_validator("modalities", "tasks")
     @classmethod
     def require_unique_nonblank_values(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        if any(not value.strip() for value in values) or len(values) != len(set(values)):
+        if any(not value.strip() for value in values) or len(values) != len(
+            set(values)
+        ):
             raise ValueError("modalities and tasks must be unique non-blank values")
         return values
 
@@ -225,7 +241,9 @@ class ToolManifest(BaseModel):
     @classmethod
     def require_nonempty_argv(cls, argv: tuple[str, ...]) -> tuple[str, ...]:
         if any(not arg.strip() for arg in argv):
-            raise ValueError("verify must be a non-empty argv list of non-blank strings")
+            raise ValueError(
+                "verify must be a non-empty argv list of non-blank strings"
+            )
         return argv
 
     @model_validator(mode="after")

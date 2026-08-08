@@ -114,7 +114,9 @@ def test_schema_and_model_reject_mutable_runtime_or_source_pin(
         data["source"] = replacement
     else:
         data["runtime"] = replacement
-    schema = json.loads((ROOT / "schemas/hyperspectrum-tool-v1.schema.json").read_text())
+    schema = json.loads(
+        (ROOT / "schemas/hyperspectrum-tool-v1.schema.json").read_text()
+    )
 
     with pytest.raises(ValidationError, match=message):
         load_tool_manifest(data)
@@ -134,7 +136,9 @@ def test_schema_and_model_require_digest_for_declared_present_weights() -> None:
     # Break caught: a claimed present checkpoint could be selected without integrity evidence.
     data = manifest()
     data["weights"] = {"required": True, "state": "present", "allow_download": False}
-    schema = json.loads((ROOT / "schemas/hyperspectrum-tool-v1.schema.json").read_text())
+    schema = json.loads(
+        (ROOT / "schemas/hyperspectrum-tool-v1.schema.json").read_text()
+    )
 
     with pytest.raises(ValidationError, match="weight digest"):
         load_tool_manifest(data)
@@ -150,6 +154,19 @@ def test_rejects_unknown_output_role() -> None:
         load_tool_manifest(data)
 
 
+def test_schema_and_model_reject_empty_tool_outputs() -> None:
+    # Break caught: vacuous output checks could admit a tool that cannot produce a prediction.
+    data = manifest()
+    data["outputs"] = []
+    schema = json.loads(
+        (ROOT / "schemas/hyperspectrum-tool-v1.schema.json").read_text()
+    )
+
+    with pytest.raises(ValidationError, match="outputs"):
+        load_tool_manifest(data)
+    assert not Draft202012Validator(schema).is_valid(data)
+
+
 def test_published_schema_rejects_duplicate_artifact_roles() -> None:
     # Break caught: schema-only consumers could accept an ambiguous role that the runtime rejects.
     data = manifest()
@@ -157,7 +174,9 @@ def test_published_schema_rejects_duplicate_artifact_roles() -> None:
         {"role": "denoised_signal", "kind": "dense_array"},
         {"role": "denoised_signal", "kind": "dense_array"},
     ]
-    schema = json.loads((ROOT / "schemas/hyperspectrum-tool-v1.schema.json").read_text())
+    schema = json.loads(
+        (ROOT / "schemas/hyperspectrum-tool-v1.schema.json").read_text()
+    )
 
     assert not Draft202012Validator(schema).is_valid(data)
 
@@ -192,7 +211,11 @@ def test_rejects_missing_license_state() -> None:
 @pytest.mark.parametrize(
     ("section", "replacement", "message"),
     [
-        ("weights", {"required": True, "state": "required-missing", "allow_download": True}, "download"),
+        (
+            "weights",
+            {"required": True, "state": "required-missing", "allow_download": True},
+            "download",
+        ),
         ("training", {"enabled": True}, "training"),
     ],
 )
@@ -241,16 +264,22 @@ def test_match_fails_closed_on_every_required_gate() -> None:
         matching.model_copy(update={"task": "classification"}),
         matching.model_copy(update={"input_roles": ("spectrum",)}),
         matching.model_copy(update={"output_roles": ("prediction",)}),
-        matching.model_copy(update={"license_policy": LicensePolicy.open_distribution()}),
+        matching.model_copy(
+            update={"license_policy": LicensePolicy.open_distribution()}
+        ),
         matching.model_copy(update={"weights_state": "present"}),
         matching.model_copy(
-            update={"resources": ResourceBudget(cpu=2, memory_gb=16, gpu_available=False)}
+            update={
+                "resources": ResourceBudget(cpu=2, memory_gb=16, gpu_available=False)
+            }
         ),
     ):
         assert registry.match(mismatch) == ()
 
 
-def test_default_match_excludes_tool_with_unresolvable_entrypoint_verify_or_weights() -> None:
+def test_default_match_excludes_tool_with_unresolvable_entrypoint_verify_or_weights() -> (
+    None
+):
     # Break caught: selection could return a manifest that cannot safely be executed.
     tool = load_tool_manifest(manifest())
     registry = ToolRegistry((tool,))
@@ -293,7 +322,9 @@ def test_injected_availability_resolver_allows_deterministic_executable_match() 
     assert registry.match(request) == (tool,)
 
 
-def test_new_local_savgol_wrapper_is_executable_while_external_adapter_remains_unavailable() -> None:
+def test_new_local_savgol_wrapper_is_executable_while_external_adapter_remains_unavailable() -> (
+    None
+):
     # Break caught: Task 6's local wrapper could remain unselectable or unblock the external adapter.
     savgol = load_tool_manifest(ROOT / "tools/xas/savgol/tool.yaml")
     xasdenoise = load_tool_manifest(ROOT / "tools/xas/xasdenoise/tool.yaml")
@@ -330,7 +361,11 @@ def test_default_availability_rejects_unprovable_top_level_entrypoint_object(
     data = manifest()
     data["entrypoint"] = entrypoint
     data["verify"] = ["python3", "-c", "pass"]
-    data["weights"] = {"required": False, "state": "not-required", "allow_download": False}
+    data["weights"] = {
+        "required": False,
+        "state": "not-required",
+        "allow_download": False,
+    }
     tool = load_tool_manifest(data)
 
     availability = ToolRegistry((tool,)).availability(tool)
@@ -348,7 +383,11 @@ def test_default_availability_never_probes_host_for_container_tool() -> None:
     }
     data["entrypoint"] = "hyperspectrum.registry.loader:ToolRegistry"
     data["verify"] = ["python3", "-m", "hyperspectrum.registry.loader"]
-    data["weights"] = {"required": False, "state": "not-required", "allow_download": False}
+    data["weights"] = {
+        "required": False,
+        "state": "not-required",
+        "allow_download": False,
+    }
     tool = load_tool_manifest(data)
     request = ToolMatchRequest(
         modality="xas",

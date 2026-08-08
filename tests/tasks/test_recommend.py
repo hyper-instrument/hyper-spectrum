@@ -45,7 +45,7 @@ def candidate(
     return DatasetCandidate(
         dataset_code="declared-xas-evidence",
         dataset_version="v1",
-        content_digest="digest",
+        content_digest="a" * 64,
         title="Declared XAS evidence",
         description="",
         file_count=1,
@@ -140,7 +140,13 @@ def test_recommendations_follow_verified_xas_evidence(
 
     verdicts = recommend_xas_tasks(profile_xas_candidate(dataset))
 
-    assert [(verdict.status, verdict.candidate_tasks) for verdict in verdicts] == [(status, tasks)]
+    assert {
+        (verdict.dataset_code, verdict.dataset_version, verdict.content_digest)
+        for verdict in verdicts
+    } == {("declared-xas-evidence", "v1", "a" * 64)}
+    assert [(verdict.status, verdict.candidate_tasks) for verdict in verdicts] == [
+        (status, tasks)
+    ]
     assert verdicts[0].ground_truth_roles == roles
     assert verdicts[0].limitations == limitations
     if status == "scoreable":
@@ -197,7 +203,9 @@ def test_raw_observations_must_contain_complete_verified_pairing_evidence() -> N
     assert verdicts[0].reasons == ("xas_no_verified_scoreable_ground_truth",)
 
 
-def test_lcf_weight_regression_is_independent_of_primary_denoising_recommendation() -> None:
+def test_lcf_weight_regression_is_independent_of_primary_denoising_recommendation() -> (
+    None
+):
     """Catches using composition truth as a denoising target or primary metric."""
     verdicts = recommend_xas_tasks(
         profile_xas_candidate(
@@ -208,14 +216,21 @@ def test_lcf_weight_regression_is_independent_of_primary_denoising_recommendatio
         )
     )
 
-    assert [(verdict.candidate_tasks, verdict.ground_truth_roles) for verdict in verdicts] == [
+    assert [
+        (verdict.candidate_tasks, verdict.ground_truth_roles) for verdict in verdicts
+    ] == [
         (("denoising",), ("clean_spectrum",)),
         (("lcf_weight_regression",), ("mixture_composition",)),
     ]
-    assert all("lcf_weight_regression" not in verdict.candidate_tasks for verdict in verdicts[:1])
+    assert all(
+        "lcf_weight_regression" not in verdict.candidate_tasks
+        for verdict in verdicts[:1]
+    )
 
 
-def test_lcf_weight_regression_requires_verified_composition_in_one_observation() -> None:
+def test_lcf_weight_regression_requires_verified_composition_in_one_observation() -> (
+    None
+):
     """Catches LCF admission from an aggregate label claim or an unverified observation."""
     dataset = candidate(
         label_roles=("mixture_composition",),
@@ -257,6 +272,9 @@ def test_scoreable_verdict_rejects_noncanonical_truth_or_unsafe_splits(
     """Catches public constructors bypassing task truth or leakage contracts."""
     with pytest.raises(ValidationError):
         ReadinessVerdict(
+            dataset_code="declared-xas-evidence",
+            dataset_version="v1",
+            content_digest="a" * 64,
             status="scoreable",
             reasons=("declared_test_evidence",),
             candidate_tasks=(task,),
@@ -289,6 +307,9 @@ def test_scoreable_verdict_accepts_canonical_task_contracts(
 ) -> None:
     """Catches rejecting a legitimate public scoreable task contract."""
     verdict = ReadinessVerdict(
+        dataset_code="declared-xas-evidence",
+        dataset_version="v1",
+        content_digest="a" * 64,
         status="scoreable",
         reasons=("declared_test_evidence",),
         candidate_tasks=(task,),

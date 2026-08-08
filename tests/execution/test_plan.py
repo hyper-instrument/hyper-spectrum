@@ -64,11 +64,17 @@ def dataset(
 def verdict(*, status: str = "scoreable") -> ReadinessVerdict:
     if status != "scoreable":
         return ReadinessVerdict(
+            dataset_code="synthetic-xas-denoising-fixture",
+            dataset_version="fixture-v1",
+            content_digest=FIXTURE_DIGEST,
             status=status,  # type: ignore[arg-type]
             reasons=("test_non_scoreable",),
             candidate_tasks=(),
         )
     return ReadinessVerdict(
+        dataset_code="synthetic-xas-denoising-fixture",
+        dataset_version="fixture-v1",
+        content_digest=FIXTURE_DIGEST,
         status="scoreable",
         reasons=("xas_verified_noisy_clean_pair",),
         candidate_tasks=("denoising",),
@@ -120,6 +126,7 @@ def test_plan_preserves_every_reproducibility_input_and_detaches_parameters(
     assert result.dataset_version == "fixture-v1"
     assert result.data_digest == FIXTURE_DIGEST
     assert result.tool_digest == savgol().tool_digest
+    assert len(result.implementation_digest) == 64
     assert result.weight_digest == "none"
     assert result.backend == "local"
     assert result.resources == resources()
@@ -132,6 +139,35 @@ def test_plan_preserves_every_reproducibility_input_and_detaches_parameters(
     assert len(result.plan_digest) == 64
     with pytest.raises(TypeError):
         result.parameters["new"] = "forbidden"  # type: ignore[index]
+
+
+def test_implementation_digest_is_the_exact_resolved_entrypoint_source_bytes(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a manifest digest could be falsely attributed to unrelated hardcoded code.
+    source = ROOT / "src/hyperspectrum/plugins/xas/baselines.py"
+
+    result = plan(tmp_path)
+
+    assert result.implementation_digest == sha256(source.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("dataset_code", "another-dataset"),
+        ("dataset_version", "v2"),
+        ("content_digest", "f" * 64),
+    ],
+)
+def test_planning_rejects_verdict_for_a_different_dataset_identity(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    # Break caught: readiness evidence from dataset A could authorize execution of dataset B.
+    mismatched = verdict().model_copy(update={field: value})
+
+    with pytest.raises(ValueError, match="dataset identity"):
+        plan(tmp_path, verdict=mismatched)
 
 
 def test_model_digest_is_canonical_and_identifies_exact_algorithm_configuration(
@@ -177,6 +213,16 @@ def test_planning_rejects_backend_resource_mismatch(tmp_path: Path) -> None:
     # Break caught: a selected backend could admit a tool it cannot execute reliably.
     with pytest.raises(ValueError, match="memory"):
         plan(tmp_path, resources=resources(memory_gb=0.5))
+
+
+def test_planning_requires_one_dense_denoised_signal_output(tmp_path: Path) -> None:
+    # Break caught: a nonempty but task-incompatible output could pass a vacuous kind-only check.
+    source = savgol().model_dump(mode="json", exclude_none=True)
+    source["outputs"] = [{"role": "normalized_signal", "kind": "dense_array"}]
+    incompatible = ToolManifest.model_validate(source)
+
+    with pytest.raises(ValueError, match="denoised_signal"):
+        plan(tmp_path, tool=incompatible)
 
 
 def test_planning_rejects_required_missing_and_unverified_model_weights(

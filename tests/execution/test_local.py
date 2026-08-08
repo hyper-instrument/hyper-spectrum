@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from hashlib import sha256
 from pathlib import Path
 
@@ -10,10 +11,12 @@ import numpy as np
 import pytest
 
 from hyperspectrum.contracts import PredictionBundle
-from hyperspectrum.execution.local import MaterializedInputSet, execute_local_run
-from hyperspectrum.plugins.xas.arrays import XASSpectrum
+from hyperspectrum.execution import local
+from hyperspectrum.execution.local import execute_local_run
+from hyperspectrum.hyperdata.models import DatasetCandidate
+from hyperspectrum.tasks.recommend import ReadinessVerdict
 
-from .test_plan import plan, savgol
+from .test_plan import dataset, plan, savgol, verdict
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "tests/fixtures/xas/denoising-pairs.npz"
@@ -25,24 +28,14 @@ def fixture_ids(limit: int = 3) -> tuple[str, ...]:
         return tuple(str(value) for value in data["sample_ids"][:limit])
 
 
-def materialize_fixture(selected_ids: tuple[str, ...]) -> MaterializedInputSet:
-    """Read only noisy inputs and explicit coordinates from the synthetic fixture."""
-    with np.load(FIXTURE, allow_pickle=False) as data:
-        sample_ids = [str(value) for value in data["sample_ids"]]
-        index_by_id = {sample_id: index for index, sample_id in enumerate(sample_ids)}
-        return MaterializedInputSet(
-            data_digest=FIXTURE_DIGEST,
-            spectra=tuple(
-                XASSpectrum(
-                    sample_id=sample_id,
-                    group_id=str(data["group_ids"][index_by_id[sample_id]]),
-                    energy=data["energy"][index_by_id[sample_id]],
-                    intensity=data["noisy"][index_by_id[sample_id]],
-                    energy_unit=str(data["energy_unit"]),  # type: ignore[arg-type]
-                )
-                for sample_id in selected_ids
-            ),
-        )
+def dataset_for_source(path: Path) -> DatasetCandidate:
+    return dataset(content_digest=sha256(path.read_bytes()).hexdigest())
+
+
+def verdict_for_source(path: Path) -> ReadinessVerdict:
+    return verdict().model_copy(
+        update={"content_digest": sha256(path.read_bytes()).hexdigest()}
+    )
 
 
 def assert_no_scoring_fields(value: object) -> None:
@@ -75,7 +68,7 @@ def test_local_savgol_smoke_publishes_a_complete_prediction_bundle_without_scori
         run_plan,
         tool=savgol(),
         selected_sample_ids=selected,
-        materialize=materialize_fixture,
+        source_npz=FIXTURE,
     )
 
     assert run_plan.output_directory.is_dir()
@@ -89,6 +82,7 @@ def test_local_savgol_smoke_publishes_a_complete_prediction_bundle_without_scori
     assert bundle.failures == ()
     assert bundle.provenance["model_digest"] == run_plan.model_digest
     assert bundle.provenance["tool_digest"] == run_plan.tool_digest
+    assert bundle.provenance["implementation_digest"] == run_plan.implementation_digest
     assert bundle.provenance["data_digest"] == run_plan.data_digest
     assert bundle.provenance["environment_digest"] == run_plan.environment_digest
     assert bundle.provenance["weight_digest"] == "none"
@@ -104,6 +98,7 @@ def test_local_savgol_smoke_publishes_a_complete_prediction_bundle_without_scori
         "plan_digest": run_plan.plan_digest,
         "model_digest": run_plan.model_digest,
         "tool_digest": run_plan.tool_digest,
+        "implementation_digest": run_plan.implementation_digest,
         "weight_digest": "none",
         "data_digest": run_plan.data_digest,
         "environment_digest": run_plan.environment_digest,
@@ -126,22 +121,53 @@ def test_local_savgol_smoke_publishes_a_complete_prediction_bundle_without_scori
     assert_no_scoring_fields(run_data)
 
 
-@pytest.mark.parametrize("partial", [(), fixture_ids(2)])
+def test_executor_runs_fresh_verified_source_not_a_preimported_callable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Break caught: execution could ignore entrypoint source and call a preimported hardcoded function.
+    from hyperspectrum.plugins.xas import baselines
+
+    def wrong_callable(*args: object, **kwargs: object) -> object:
+        raise AssertionError("preimported callable must not run")
+
+    monkeypatch.setattr(baselines, "savgol_filter", wrong_callable)
+
+    bundle = execute_local_run(
+        plan(tmp_path),
+        tool=savgol(),
+        selected_sample_ids=fixture_ids(1),
+        source_npz=FIXTURE,
+    )
+
+    assert len(bundle.predictions) == 1
+
+
 def test_partial_input_materialization_aborts_without_a_final_run_directory(
-    tmp_path: Path, partial: tuple[str, ...]
+    tmp_path: Path,
 ) -> None:
     # Break caught: execution could silently filter missing selected samples and publish partial output.
-    run_plan = plan(tmp_path)
-
-    def materialize(_: tuple[str, ...]) -> MaterializedInputSet:
-        return materialize_fixture(partial)
+    partial = tmp_path / "partial.npz"
+    with np.load(FIXTURE, allow_pickle=False) as data:
+        np.savez(
+            partial,
+            energy=data["energy"][:2],
+            noisy=data["noisy"][:2],
+            sample_ids=data["sample_ids"][:2],
+            group_ids=data["group_ids"][:2],
+            energy_unit=data["energy_unit"],
+        )
+    run_plan = plan(
+        tmp_path,
+        dataset=dataset_for_source(partial),
+        verdict=verdict_for_source(partial),
+    )
 
     with pytest.raises(ValueError, match="complete selected input set"):
         execute_local_run(
             run_plan,
             tool=savgol(),
             selected_sample_ids=fixture_ids(),
-            materialize=materialize,
+            source_npz=partial,
         )
 
     assert not run_plan.output_directory.exists()
@@ -152,17 +178,20 @@ def test_materialization_exception_aborts_without_a_final_run_directory(
     tmp_path: Path,
 ) -> None:
     # Break caught: a source read error could leave a directory that looks like a completed run.
-    run_plan = plan(tmp_path)
+    malformed = tmp_path / "malformed.npz"
+    malformed.write_bytes(b"not-an-npz")
+    run_plan = plan(
+        tmp_path,
+        dataset=dataset_for_source(malformed),
+        verdict=verdict_for_source(malformed),
+    )
 
-    def fail(_: tuple[str, ...]) -> MaterializedInputSet:
-        raise OSError("fixture read failed")
-
-    with pytest.raises(OSError, match="fixture read failed"):
+    with pytest.raises((OSError, ValueError)):
         execute_local_run(
             run_plan,
             tool=savgol(),
             selected_sample_ids=fixture_ids(),
-            materialize=fail,
+            source_npz=malformed,
         )
 
     assert not run_plan.output_directory.exists()
@@ -179,7 +208,7 @@ def test_model_failures_are_recorded_one_for_one_without_disappearing(
         run_plan,
         tool=savgol(),
         selected_sample_ids=fixture_ids(),
-        materialize=materialize_fixture,
+        source_npz=FIXTURE,
     )
 
     assert bundle.predictions == ()
@@ -195,28 +224,28 @@ def test_model_failures_are_recorded_one_for_one_without_disappearing(
 
 def test_sample_ids_cannot_escape_the_array_artifact_directory(tmp_path: Path) -> None:
     # Break caught: using a sample ID as a filename could overwrite files outside the run.
-    run_plan = plan(tmp_path, max_samples=1)
     malicious_id = "../../escape"
-
-    def materialize(_: tuple[str, ...]) -> MaterializedInputSet:
-        return MaterializedInputSet(
-            data_digest=FIXTURE_DIGEST,
-            spectra=(
-                XASSpectrum(
-                    sample_id=malicious_id,
-                    group_id="synthetic",
-                    energy=np.array([1.0, 2.0, 3.0, 4.0, 5.0]),
-                    intensity=np.array([0.0, 0.2, 0.8, 0.3, 0.1]),
-                    energy_unit="eV",
-                ),
-            ),
-        )
+    source = tmp_path / "malicious-id.npz"
+    np.savez(
+        source,
+        energy=np.array([[1.0, 2.0, 3.0, 4.0, 5.0]]),
+        noisy=np.array([[0.0, 0.2, 0.8, 0.3, 0.1]]),
+        sample_ids=np.array([malicious_id]),
+        group_ids=np.array(["synthetic"]),
+        energy_unit=np.array("eV"),
+    )
+    run_plan = plan(
+        tmp_path,
+        max_samples=1,
+        dataset=dataset_for_source(source),
+        verdict=verdict_for_source(source),
+    )
 
     bundle = execute_local_run(
         run_plan,
         tool=savgol(),
         selected_sample_ids=(malicious_id,),
-        materialize=materialize,
+        source_npz=source,
     )
 
     artifact = bundle.predictions[0]
@@ -232,23 +261,107 @@ def test_sample_ids_cannot_escape_the_array_artifact_directory(tmp_path: Path) -
 def test_dry_run_plan_cannot_execute_or_materialize_inputs(tmp_path: Path) -> None:
     # Break caught: a planning-only command could cause scientific data reads or filesystem writes.
     run_plan = plan(tmp_path, dry_run=True)
-    called = False
-
-    def materialize(_: tuple[str, ...]) -> MaterializedInputSet:
-        nonlocal called
-        called = True
-        return materialize_fixture(fixture_ids())
+    missing = tmp_path / "must-not-be-read.npz"
 
     with pytest.raises(ValueError, match="dry-run"):
         execute_local_run(
             run_plan,
             tool=savgol(),
             selected_sample_ids=fixture_ids(),
-            materialize=materialize,
+            source_npz=missing,
         )
 
-    assert called is False
     assert not run_plan.output_directory.exists()
+
+
+def test_executor_rejects_a_changed_implementation_digest(tmp_path: Path) -> None:
+    # Break caught: source-code changes after planning could execute under stale model provenance.
+    run_plan = plan(tmp_path).model_copy(update={"implementation_digest": "f" * 64})
+
+    with pytest.raises(ValueError, match="implementation digest"):
+        execute_local_run(
+            run_plan,
+            tool=savgol(),
+            selected_sample_ids=fixture_ids(),
+            source_npz=FIXTURE,
+        )
+
+    assert not run_plan.output_directory.exists()
+
+
+def test_executor_recomputes_and_rejects_a_stale_environment_digest(
+    tmp_path: Path,
+) -> None:
+    # Break caught: output could copy a planned environment identity never used for execution.
+    run_plan = plan(tmp_path).model_copy(update={"environment_digest": "f" * 64})
+
+    with pytest.raises(ValueError, match="environment digest"):
+        execute_local_run(
+            run_plan,
+            tool=savgol(),
+            selected_sample_ids=fixture_ids(),
+            source_npz=FIXTURE,
+        )
+
+    assert not run_plan.output_directory.exists()
+
+
+def test_savgol_policy_rejects_a_different_manifest_entrypoint(tmp_path: Path) -> None:
+    # Break caught: the executor could attribute its hardcoded callable to a changed entrypoint.
+    changed = savgol().model_copy(
+        update={"entrypoint": "hyperspectrum.plugins.xas.baselines:identity_filter"}
+    )
+    run_plan = plan(tmp_path, tool=changed)
+
+    with pytest.raises(ValueError, match="SavGol entrypoint"):
+        execute_local_run(
+            run_plan,
+            tool=changed,
+            selected_sample_ids=fixture_ids(),
+            source_npz=FIXTURE,
+        )
+
+
+def test_atomic_rename_noreplace_preserves_both_directories_on_collision(
+    tmp_path: Path,
+) -> None:
+    # Break caught: publication could replace an empty existing run directory on POSIX.
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+
+    with pytest.raises(FileExistsError):
+        local._atomic_rename_noreplace(source, destination)
+
+    assert source.is_dir()
+    assert destination.is_dir()
+
+
+def test_destination_created_immediately_before_publish_is_not_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Break caught: a check-then-rename TOCTOU could overwrite a concurrent empty directory.
+    run_plan = plan(tmp_path)
+    real_publish = local._atomic_rename_noreplace
+
+    def collide(source: Path, destination: Path) -> None:
+        destination.mkdir()
+        real_publish(source, destination)
+
+    monkeypatch.setattr(local, "_atomic_rename_noreplace", collide)
+
+    with pytest.raises(FileExistsError):
+        execute_local_run(
+            run_plan,
+            tool=savgol(),
+            selected_sample_ids=fixture_ids(),
+            source_npz=FIXTURE,
+        )
+
+    assert run_plan.output_directory.is_dir()
+    assert tuple(run_plan.output_directory.iterdir()) == ()
+    assert not tuple(tmp_path.glob(".run.*"))
 
 
 def test_executor_refuses_to_overwrite_an_existing_run_directory(
@@ -259,41 +372,32 @@ def test_executor_refuses_to_overwrite_an_existing_run_directory(
     run_plan.output_directory.mkdir()
     marker = run_plan.output_directory / "keep.txt"
     marker.write_text("original")
-    called = False
-
-    def materialize(_: tuple[str, ...]) -> MaterializedInputSet:
-        nonlocal called
-        called = True
-        return materialize_fixture(fixture_ids())
-
     with pytest.raises(FileExistsError):
         execute_local_run(
             run_plan,
             tool=savgol(),
             selected_sample_ids=fixture_ids(),
-            materialize=materialize,
+            source_npz=tmp_path / "must-not-be-read.npz",
         )
 
-    assert called is False
     assert marker.read_text() == "original"
 
 
-def test_executor_rejects_materialized_data_with_a_different_content_digest(
+def test_executor_hashes_source_bytes_and_rejects_a_different_content_digest(
     tmp_path: Path,
 ) -> None:
-    # Break caught: a materializer could silently serve different bytes than the immutable plan selected.
+    # Break caught: a caller could assert a planned digest while supplying unrelated input bytes.
     run_plan = plan(tmp_path)
-    materialized = materialize_fixture(fixture_ids())
-
-    def materialize(_: tuple[str, ...]) -> MaterializedInputSet:
-        return MaterializedInputSet(data_digest="f" * 64, spectra=materialized.spectra)
+    changed = tmp_path / "changed.npz"
+    shutil.copyfile(FIXTURE, changed)
+    changed.write_bytes(changed.read_bytes() + b"changed")
 
     with pytest.raises(ValueError, match="data digest"):
         execute_local_run(
             run_plan,
             tool=savgol(),
             selected_sample_ids=fixture_ids(),
-            materialize=materialize,
+            source_npz=changed,
         )
 
     assert not run_plan.output_directory.exists()
@@ -304,20 +408,13 @@ def test_executor_rejects_a_manifest_that_does_not_match_the_immutable_plan(
 ) -> None:
     # Break caught: an executor could run changed tool semantics under an old provenance digest.
     run_plan = plan(tmp_path).model_copy(update={"tool_digest": "f" * 64})
-    called = False
-
-    def materialize(_: tuple[str, ...]) -> MaterializedInputSet:
-        nonlocal called
-        called = True
-        return materialize_fixture(fixture_ids())
 
     with pytest.raises(ValueError, match="tool digest"):
         execute_local_run(
             run_plan,
             tool=savgol(),
             selected_sample_ids=fixture_ids(),
-            materialize=materialize,
+            source_npz=FIXTURE,
         )
 
-    assert called is False
     assert not run_plan.output_directory.exists()

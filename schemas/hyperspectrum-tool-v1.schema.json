@@ -21,7 +21,7 @@
     },
     "entrypoint": {"type": "string", "minLength": 1},
     "inputs": {"$ref": "#/$defs/artifactArray"},
-    "outputs": {"$ref": "#/$defs/artifactArray"},
+    "outputs": {"allOf": [{"$ref": "#/$defs/artifactArray"}, {"minItems": 1}]},
     "resources": {"$ref": "#/$defs/resources"},
     "verify": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
     "source": {"$ref": "#/$defs/source"},

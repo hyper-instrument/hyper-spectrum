@@ -25,6 +25,9 @@ class ReadinessVerdict(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    dataset_code: str
+    dataset_version: str | None
+    content_digest: str | None
     status: Literal["scoreable", "inference_only", "blocked"]
     reasons: tuple[str, ...]
     candidate_tasks: tuple[str, ...]
@@ -46,8 +49,13 @@ class ReadinessVerdict(BaseModel):
         allowed_roles = _TASK_GROUND_TRUTH_ROLES.get(task)
         if allowed_roles is None:
             raise ValueError("scoreable verdicts require a canonical candidate task")
-        if len(self.ground_truth_roles) != 1 or self.ground_truth_roles[0] not in allowed_roles:
-            raise ValueError("scoreable verdicts require a task-consistent ground-truth role")
+        if (
+            len(self.ground_truth_roles) != 1
+            or self.ground_truth_roles[0] not in allowed_roles
+        ):
+            raise ValueError(
+                "scoreable verdicts require a task-consistent ground-truth role"
+            )
         if not _SAFE_SPLIT_GROUP_KEYS.intersection(self.split_group_keys):
             raise ValueError("scoreable verdicts require a safe split group key")
         if (
@@ -55,7 +63,9 @@ class ReadinessVerdict(BaseModel):
             and self.ground_truth_roles == ("average_spectrum",)
             and _PROXY_LIMITATION not in self.limitations
         ):
-            raise ValueError("average-spectrum denoising requires a documented proxy limitation")
+            raise ValueError(
+                "average-spectrum denoising requires a documented proxy limitation"
+            )
         return self
 
 
@@ -77,6 +87,8 @@ class XASCandidateProfile(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     dataset_code: str
+    dataset_version: str | None
+    content_digest: str | None
     access_available: bool
     energy_axis_valid: bool
     verified_label_roles: tuple[str, ...]
@@ -101,9 +113,12 @@ def profile_xas_candidate(candidate: DatasetCandidate) -> XASCandidateProfile:
     energy_axis = _mapping(_mapping(evidence.get("axis_evidence")).get("energy_axis"))
     return XASCandidateProfile(
         dataset_code=candidate.dataset_code,
+        dataset_version=candidate.dataset_version,
+        content_digest=candidate.content_digest,
         access_available=evidence.get("access_status") == "admitted_catalog",
         energy_axis_valid=(
-            energy_axis.get("valid") is True and _nonblank(energy_axis.get("unit")) is not None
+            energy_axis.get("valid") is True
+            and _nonblank(energy_axis.get("unit")) is not None
         ),
         verified_label_roles=(
             _strings(aggregate_labels.get("ground_truth_roles"))
@@ -129,20 +144,27 @@ def recommend_xas_tasks(profile: XASCandidateProfile) -> tuple[ReadinessVerdict,
     if _aggregate_and_observation_pair(profile, "noisy_spectrum", "clean_spectrum"):
         verdicts.append(
             _scoreable(
+                profile=profile,
                 task="denoising",
                 reason="xas_verified_noisy_clean_pair",
                 roles=("clean_spectrum",),
                 split_keys=("sample_id", "compound_id"),
-                details=("A verified noisy/clean spectrum pair supplies clean-spectrum truth.",),
+                details=(
+                    "A verified noisy/clean spectrum pair supplies clean-spectrum truth.",
+                ),
             )
         )
-    elif _aggregate_and_observation_pair(profile, "repeated_scan", "average_spectrum") and any(
-        observation.proxy_kind == "repeated_scan_average" for observation in profile.observations
+    elif _aggregate_and_observation_pair(
+        profile, "repeated_scan", "average_spectrum"
+    ) and any(
+        observation.proxy_kind == "repeated_scan_average"
+        for observation in profile.observations
         if observation.pairing_verified
         and {"repeated_scan", "average_spectrum"}.issubset(observation.pairing_roles)
     ):
         verdicts.append(
             _scoreable(
+                profile=profile,
                 task="denoising",
                 reason="xas_verified_repeated_scan_average_proxy",
                 roles=("average_spectrum",),
@@ -156,16 +178,20 @@ def recommend_xas_tasks(profile: XASCandidateProfile) -> tuple[ReadinessVerdict,
     if _aggregate_and_observation_pair(profile, "structure", "spectrum"):
         verdicts.append(
             _scoreable(
+                profile=profile,
                 task="forward_spectrum_prediction",
                 reason="xas_verified_structure_spectrum_pair",
                 roles=("spectrum",),
                 split_keys=("compound_id",),
-                details=("A verified structure/spectrum pair supplies spectrum truth.",),
+                details=(
+                    "A verified structure/spectrum pair supplies spectrum truth.",
+                ),
             )
         )
     if _aggregate_and_observation_label(profile, "oxidation_state"):
         verdicts.append(
             _scoreable(
+                profile=profile,
                 task="oxidation_state_classification",
                 reason="xas_verified_oxidation_state_labels",
                 roles=("oxidation_state",),
@@ -174,14 +200,17 @@ def recommend_xas_tasks(profile: XASCandidateProfile) -> tuple[ReadinessVerdict,
             )
         )
     if _aggregate_and_observation_label(profile, "mixture_composition"):
-        verdicts.append(_lcf_verdict("mixture_composition"))
+        verdicts.append(_lcf_verdict(profile, "mixture_composition"))
     elif _aggregate_and_observation_label(profile, "composition"):
-        verdicts.append(_lcf_verdict("composition"))
+        verdicts.append(_lcf_verdict(profile, "composition"))
 
     if verdicts:
         return tuple(verdicts)
     return (
         ReadinessVerdict(
+            dataset_code=profile.dataset_code,
+            dataset_version=profile.dataset_version,
+            content_digest=profile.content_digest,
             status="inference_only",
             reasons=("xas_no_verified_scoreable_ground_truth",),
             candidate_tasks=(),
@@ -198,10 +227,15 @@ def _blocked_verdict(profile: XASCandidateProfile) -> ReadinessVerdict | None:
         details.append("The candidate is not available through the admitted catalog.")
     if not profile.energy_axis_valid:
         reasons.append("xas_energy_axis_invalid")
-        details.append("The candidate has no verified energy axis with a declared unit.")
+        details.append(
+            "The candidate has no verified energy axis with a declared unit."
+        )
     if not reasons:
         return None
     return ReadinessVerdict(
+        dataset_code=profile.dataset_code,
+        dataset_version=profile.dataset_version,
+        content_digest=profile.content_digest,
         status="blocked",
         reasons=tuple(reasons),
         candidate_tasks=(),
@@ -211,6 +245,7 @@ def _blocked_verdict(profile: XASCandidateProfile) -> ReadinessVerdict | None:
 
 def _scoreable(
     *,
+    profile: XASCandidateProfile,
     task: str,
     reason: str,
     roles: tuple[str, ...],
@@ -221,6 +256,9 @@ def _scoreable(
     """Build one separately scoreable task recommendation."""
     reasons = (reason, *limitations)
     return ReadinessVerdict(
+        dataset_code=profile.dataset_code,
+        dataset_version=profile.dataset_version,
+        content_digest=profile.content_digest,
         status="scoreable",
         reasons=reasons,
         candidate_tasks=(task,),
@@ -231,20 +269,21 @@ def _scoreable(
     )
 
 
-def _lcf_verdict(role: str) -> ReadinessVerdict:
+def _lcf_verdict(profile: XASCandidateProfile, role: str) -> ReadinessVerdict:
     """Keep LCF weight regression a separate composition-truth recommendation."""
     return _scoreable(
+        profile=profile,
         task="lcf_weight_regression",
         reason="xas_verified_mixture_composition_labels",
         roles=(role,),
         split_keys=("compound_id",),
-        details=("Verified mixture/composition truth supports independent LCF-weight regression.",),
+        details=(
+            "Verified mixture/composition truth supports independent LCF-weight regression.",
+        ),
     )
 
 
-def _aggregate_and_observation_pair(
-    profile: XASCandidateProfile, *roles: str
-) -> bool:
+def _aggregate_and_observation_pair(profile: XASCandidateProfile, *roles: str) -> bool:
     """Require the complete verified pair in aggregate and one raw observation."""
     required = set(roles)
     return required.issubset(profile.verified_pairing_roles) and any(
@@ -289,7 +328,9 @@ def _mapping(value: object) -> Mapping[str, object]:
 def _strings(value: object) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return ()
-    return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+    return tuple(
+        item.strip() for item in value if isinstance(item, str) and item.strip()
+    )
 
 
 def _nonblank(value: object) -> str | None:
