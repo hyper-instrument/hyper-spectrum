@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -129,3 +131,120 @@ def test_contract_instances_are_frozen() -> None:
 
     with pytest.raises(ValidationError):
         instance.unit = "keV"  # type: ignore[misc]
+
+
+def test_observation_json_metadata_is_recursively_immutable_and_detached() -> None:
+    context = {"instrument": {"scan_modes": ["transmission"]}}
+    labels = {"assignments": ["oxide"]}
+    provenance = {"sources": {"files": ["scan-001"]}}
+    observation = ObservationBundle(
+        schema_version="hyperspectrum-observation/v1",
+        sample_id="sample-001",
+        modality="xas",
+        artifacts=(artifact(),),
+        context=context,
+        labels=labels,
+        provenance=provenance,
+    )
+
+    context["instrument"]["scan_modes"].append("fluorescence")
+    labels["assignments"].append("metal")
+    provenance["sources"]["files"].append("scan-002")
+
+    assert observation.model_dump()["context"] == {
+        "instrument": {"scan_modes": ["transmission"]}
+    }
+    assert observation.model_dump()["labels"] == {"assignments": ["oxide"]}
+    assert observation.model_dump()["provenance"] == {
+        "sources": {"files": ["scan-001"]}
+    }
+    with pytest.raises(TypeError):
+        observation.context["new_context"] = "forbidden"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        observation.context["instrument"]["beamline"] = "BL-1"  # type: ignore[index]
+    with pytest.raises(AttributeError):
+        observation.labels["assignments"].append("forbidden")  # type: ignore[union-attr]
+
+
+def test_prediction_json_metadata_and_failures_are_recursively_immutable() -> None:
+    provenance = {
+        "model_digest": "c" * 64,
+        "tool_digest": "d" * 64,
+        "data_digest": "e" * 64,
+        "environment_digest": "f" * 64,
+        "inputs": {"shards": ["shard-001"]},
+    }
+    failures = [{"sample_id": "sample-002", "details": {"reasons": ["out_of_range"]}}]
+    prediction = PredictionBundle(
+        schema_version="hyperspectrum-prediction/v1",
+        run_id="run-001",
+        task_id="xas-denoising",
+        predictions=(artifact(role="prediction"),),
+        failures=failures,
+        provenance=provenance,
+    )
+
+    provenance["inputs"]["shards"].append("shard-002")
+    failures[0]["details"]["reasons"].append("missing_axis")
+
+    assert prediction.model_dump()["provenance"]["inputs"] == {"shards": ["shard-001"]}
+    assert prediction.model_dump()["failures"] == [
+        {"sample_id": "sample-002", "details": {"reasons": ["out_of_range"]}}
+    ]
+    with pytest.raises(TypeError):
+        prediction.provenance["new_digest"] = "forbidden"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        prediction.failures[0]["details"]["error"] = "forbidden"  # type: ignore[index]
+    with pytest.raises(AttributeError):
+        prediction.failures[0]["details"]["reasons"].append("forbidden")  # type: ignore[union-attr]
+
+
+def test_immutable_json_metadata_serializes_with_pydantic() -> None:
+    observation = ObservationBundle(
+        schema_version="hyperspectrum-observation/v1",
+        sample_id="sample-001",
+        modality="xas",
+        artifacts=(artifact(),),
+        context={"instrument": {"scan_modes": ["transmission"]}},
+        labels={},
+        provenance={},
+    )
+    prediction = PredictionBundle(
+        schema_version="hyperspectrum-prediction/v1",
+        run_id="run-001",
+        task_id="xas-denoising",
+        predictions=(artifact(role="prediction"),),
+        failures=({"sample_id": "sample-002", "details": {"reasons": ["out_of_range"]}},),
+        provenance={
+            "model_digest": "c" * 64,
+            "tool_digest": "d" * 64,
+            "data_digest": "e" * 64,
+            "environment_digest": "f" * 64,
+        },
+    )
+
+    assert observation.model_dump()["context"] == {
+        "instrument": {"scan_modes": ["transmission"]}
+    }
+    assert json.loads(observation.model_dump_json())["context"] == {
+        "instrument": {"scan_modes": ["transmission"]}
+    }
+    assert prediction.model_dump()["failures"] == [
+        {"sample_id": "sample-002", "details": {"reasons": ["out_of_range"]}}
+    ]
+    assert json.loads(prediction.model_dump_json())["failures"] == [
+        {"sample_id": "sample-002", "details": {"reasons": ["out_of_range"]}}
+    ]
+
+
+def test_non_json_mutable_metadata_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        ObservationBundle(
+            schema_version="hyperspectrum-observation/v1",
+            sample_id="sample-001",
+            modality="xas",
+            artifacts=(artifact(),),
+            context={"unsafe": bytearray(b"mutable")},
+            labels={},
+            provenance={},
+        )
