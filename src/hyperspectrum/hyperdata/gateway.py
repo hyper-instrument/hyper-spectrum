@@ -215,11 +215,10 @@ class HydGateway:
 
     @staticmethod
     def _parse_json(stdout: str) -> object:
-        lines = [line for line in stdout.splitlines() if line.strip()]
-        if not lines:
+        if not stdout.strip():
             raise HydUnsupportedJsonError("HyperData CLI returned no JSON output")
         try:
-            return json.loads(lines[-1])
+            return json.loads(stdout)
         except json.JSONDecodeError as error:
             raise HydUnsupportedJsonError("HyperData CLI returned unsupported JSON output") from error
 

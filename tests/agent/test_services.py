@@ -101,7 +101,23 @@ def test_discovery_uses_only_the_public_gateway_contract(
                 returncode=0,
                 stdout="{}",
                 stderr="",
-                payload={"records": []},
+                payload={
+                    "mode": "ilike",
+                    "query": query,
+                    "data": {
+                        "items": [],
+                        "total": 0,
+                        "page": page,
+                        "limit": limit,
+                        "next_cursor": None,
+                    },
+                    "pagination": {
+                        "page": page,
+                        "limit": limit,
+                        "total": 0,
+                        "has_next": False,
+                    },
+                },
             )
 
     monkeypatch.setattr(agent, "HydGateway", Gateway)

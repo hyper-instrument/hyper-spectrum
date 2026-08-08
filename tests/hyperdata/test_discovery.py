@@ -27,7 +27,7 @@ DATA_ENVELOPE_FIXTURE_PATH = (
 
 
 class FixtureGateway:
-    """Internal exact records-fixture compatibility, not a real hyd wire shape."""
+    """Shape cached catalog records as the exact pinned hyd envelope."""
 
     def __init__(self, records_by_query: Mapping[str, list[dict[str, object]]]) -> None:
         self.records_by_query = records_by_query
@@ -38,12 +38,30 @@ class FixtureGateway:
     ) -> HydCommandResult:
         self.queries.append(query)
         assert page == 1
+        records = self.records_by_query.get(query, [])
+        assert len(records) <= limit
         return HydCommandResult(
             argv=("hyd", "search", query, "--limit", str(limit), "--page", "1"),
             returncode=0,
             stdout="",
             stderr="",
-            payload={"records": self.records_by_query.get(query, [])},
+            payload={
+                "mode": "ilike",
+                "query": query,
+                "data": {
+                    "items": records,
+                    "total": len(records),
+                    "page": page,
+                    "limit": limit,
+                    "next_cursor": None,
+                },
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": len(records),
+                    "has_next": False,
+                },
+            },
         )
 
 
@@ -111,17 +129,11 @@ def test_discovery_reads_the_hyd_0_11_data_envelope() -> None:
     assert candidates[0].content_digest == "a" * 64
 
 
-def test_discovery_retains_records_envelope_compatibility() -> None:
-    """Removing the tested records compatibility would break cached test contracts."""
+def test_discovery_rejects_legacy_records_envelope_in_production() -> None:
+    with pytest.raises(HydUnsupportedJsonError) as captured:
+        discover_xas(EnvelopeGateway({"XAS": {"records": []}}))
 
-    record = json.loads(DATA_ENVELOPE_FIXTURE_PATH.read_text(encoding="utf-8"))["data"][
-        "items"
-    ][0]
-    candidates = discover_xas(FixtureGateway({"XAS": [record]}))
-
-    assert [candidate.dataset_code for candidate in candidates] == [
-        "public-real-envelope-xas"
-    ]
+    assert captured.value.code == "unsupported_json"
 
 
 @pytest.mark.parametrize(

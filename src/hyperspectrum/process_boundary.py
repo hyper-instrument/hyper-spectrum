@@ -7,7 +7,7 @@ import ipaddress
 import json
 import re
 from collections.abc import Mapping, Sequence
-from urllib.parse import unquote_plus
+from urllib.parse import unquote, unquote_plus, urlsplit
 
 _REDACTED = "[REDACTED]"
 _SENSITIVE_NAMES = (
@@ -41,6 +41,13 @@ _QUOTED_KEY_VALUE = re.compile(
 )
 _QUERY_VALUE = re.compile(r"([?&])([^=&#\s]+)(=)([^&#\s]*)")
 _URL_USERINFO = re.compile(r"(?i)(://)[^/@\s]+@")
+_URL = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>{}\"']+")
+_SERVICE_HOST_PORT = re.compile(
+    r"(?i)(?<![a-z0-9_.:/-])"
+    r"(?P<host>(?=[a-z0-9_.-]*[a-z_])[a-z0-9_]"
+    r"(?:[a-z0-9_.-]*[a-z0-9_])?):(?P<port>[0-9]{1,5})(?![0-9])"
+)
+_ISO_DATE_HOUR = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}t[0-9]{2}$", re.IGNORECASE)
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"(?i)\b[a-z]:\\(?:[^\\\s]+\\)*[^\\\s]+")
 _UNC_ABSOLUTE_PATH = re.compile(r"(?<!\\)\\\\(?:[^\\\s]+\\)+[^\\\s]+")
 _POSIX_ABSOLUTE_PATH = re.compile(
@@ -50,7 +57,7 @@ _ENDPOINT_HOST = re.compile(
     r"(?ix)(?<![A-Za-z0-9_.-])(?:"
     r"\[(?P<ipv6>[0-9a-f:]+)\]|"
     r"(?P<ipv4>(?:[0-9]{1,3}\.){3}[0-9]{1,3})|"
-    r"(?P<host>localhost|[a-z0-9.-]+\.(?:internal|local|lan|localhost))"
+    r"(?P<host>localhost|[a-z0-9_.-]+\.(?:corp|internal|local|lan|localhost))"
     r")(?:\:[0-9]{1,5})?"
 )
 
@@ -73,6 +80,8 @@ def redact_text(value: str) -> str:
         for line in value.splitlines(keepends=True)
     )
     redacted = _URL_USERINFO.sub(r"\1[REDACTED]@", redacted)
+    redacted = _URL.sub(_redact_endpoint_url, redacted)
+    redacted = _SERVICE_HOST_PORT.sub(_redact_service_host_port, redacted)
     redacted = _WINDOWS_ABSOLUTE_PATH.sub(_REDACTED, redacted)
     redacted = _UNC_ABSOLUTE_PATH.sub(_REDACTED, redacted)
     redacted = _POSIX_ABSOLUTE_PATH.sub(_REDACTED, redacted)
@@ -105,6 +114,53 @@ def redact_text(value: str) -> str:
         ),
         redacted,
     )
+
+
+def _redact_endpoint_url(match: re.Match[str]) -> str:
+    """Redact private/service URL authorities while preserving public data URLs."""
+
+    locator = match.group(0)
+    try:
+        parsed = urlsplit(locator)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return _redacted_url_authority(locator)
+    if hostname is None:
+        return _redacted_url_authority(locator)
+    normalized_host = unquote(hostname).rstrip(".").casefold()
+    has_scope = "%" in normalized_host
+    address_text = normalized_host.split("%", 1)[0]
+    try:
+        address = ipaddress.ip_address(address_text)
+    except ValueError:
+        is_endpoint = (
+            normalized_host == "localhost"
+            or normalized_host.endswith(
+                (".corp", ".internal", ".lan", ".local", ".localhost")
+            )
+            or ("." not in normalized_host and port is not None)
+        )
+    else:
+        is_endpoint = has_scope or not address.is_global
+    return _redacted_url_authority(locator) if is_endpoint else locator
+
+
+def _redacted_url_authority(locator: str) -> str:
+    scheme_end = locator.find("://")
+    if scheme_end < 0:
+        return _REDACTED
+    authority_start = scheme_end + 3
+    authority_end = locator.find("/", authority_start)
+    if authority_end < 0:
+        authority_end = len(locator)
+    return f"{locator[:authority_start]}{_REDACTED}{locator[authority_end:]}"
+
+
+def _redact_service_host_port(match: re.Match[str]) -> str:
+    if _ISO_DATE_HOUR.fullmatch(match.group("host")) is not None:
+        return match.group(0)
+    return _REDACTED
 
 
 def _redact_private_endpoint(match: re.Match[str]) -> str:

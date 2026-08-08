@@ -15,9 +15,16 @@ from hyperspectrum.process_boundary import redact_value
 
 _URL_LOCATOR = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>{}\[\]\"']+")
 _HOST_PORT_LOCATOR = re.compile(
-    r"(?i)(?<![a-z0-9_.-])"
-    r"(?:[a-z](?:[a-z0-9.-]*[a-z0-9])?):[1-9][0-9]{0,4}(?![0-9])"
+    r"(?i)(?<![a-z0-9_.:/-])"
+    r"(?P<host>(?=[a-z0-9_.-]*[a-z_])[a-z0-9_]"
+    r"(?:[a-z0-9_.-]*[a-z0-9_])?):[0-9]{1,5}(?![0-9])"
 )
+_PRIVATE_HOST_TOKEN = re.compile(
+    r"(?i)(?<![a-z0-9_.-])"
+    r"(?:localhost|[a-z0-9_.-]+\.(?:corp|internal|lan|local|localhost))"
+    r"(?![a-z0-9_.-])"
+)
+_ISO_DATE_HOUR = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}t[0-9]{2}$", re.IGNORECASE)
 _IPV4_TOKEN = re.compile(r"(?<![a-z0-9_.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![a-z0-9_.])")
 _IPV6_TOKEN = re.compile(
     r"\[?[0-9a-f:.]+(?:%[a-z0-9_.-]+)?\]?", re.IGNORECASE
@@ -104,7 +111,10 @@ def _contains_endpoint_locator(value: object) -> bool:
     """Detect non-URL host/port and private IPv6 locators in semantic text."""
 
     if isinstance(value, str):
-        if _HOST_PORT_LOCATOR.search(value) is not None:
+        if _PRIVATE_HOST_TOKEN.search(value) is not None or any(
+            _ISO_DATE_HOUR.fullmatch(match.group("host")) is None
+            for match in _HOST_PORT_LOCATOR.finditer(value)
+        ):
             return True
         for match in _IPV4_TOKEN.finditer(value):
             try:

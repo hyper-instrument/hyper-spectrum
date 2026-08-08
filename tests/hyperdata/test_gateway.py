@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import json
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -40,7 +41,7 @@ def completed(
     )
 
 
-def test_search_uses_the_json_contract_and_freezes_last_json_payload(
+def test_search_parses_the_pinned_pretty_json_contract_and_freezes_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Catches a profile lookup, shell invocation, or mutable payload regression."""
@@ -54,10 +55,27 @@ def test_search_uses_the_json_contract_and_freezes_last_json_payload(
     monkeypatch.setattr(Path, "read_text", fail_if_credential_file_is_read)
     runner = RecordingRunner(
         completed(
-            stdout=(
-                "search progress\n\n"
-                '{"records": [{"id": "xas-001", "tags": ["xas"]}]}\n\n'
+            stdout=json.dumps(
+                {
+                    "mode": "ilike",
+                    "query": "iron edge",
+                    "data": {
+                        "items": [{"id": "xas-001", "tags": ["xas"]}],
+                        "total": 1,
+                        "page": 3,
+                        "limit": 17,
+                        "next_cursor": None,
+                    },
+                    "pagination": {
+                        "page": 3,
+                        "limit": 17,
+                        "total": 1,
+                        "has_next": False,
+                    },
+                },
+                indent=2,
             )
+            + "\n"
         )
     )
 
@@ -78,9 +96,9 @@ def test_search_uses_the_json_contract_and_freezes_last_json_payload(
         "--json",
         "--ilike",
     )
-    assert result.payload["records"][0]["id"] == "xas-001"  # type: ignore[index]
+    assert result.payload["data"]["items"][0]["id"] == "xas-001"  # type: ignore[index]
     with pytest.raises(AttributeError):
-        result.payload["records"][0]["tags"].append("mutable")  # type: ignore[index,union-attr]
+        result.payload["data"]["items"][0]["tags"].append("mutable")  # type: ignore[index,union-attr]
     assert runner.calls == [
         (
             result.argv,
@@ -321,6 +339,26 @@ def test_non_json_output_fails_closed(stdout: str) -> None:
         HydGateway(runner=runner).search("iron", page=1, limit=20)
 
     assert error.value.code == "unsupported_json"
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    (
+        'diagnostic prefix\n{\n  "mode": "ilike"\n}\n',
+        '{\n  "mode": "ilike"\n}\ntrailing noise\n',
+        '{"mode":"ilike"}\n{"mode":"ilike"}\n',
+    ),
+)
+def test_json_output_with_diagnostic_or_trailing_noise_fails_closed(
+    stdout: str,
+) -> None:
+    runner = RecordingRunner(completed(stdout=stdout))
+
+    with pytest.raises(HydUnsupportedJsonError) as captured:
+        HydGateway(runner=runner).search("iron", page=1, limit=20)
+
+    assert captured.value.code == "unsupported_json"
+    assert stdout.strip() not in str(captured.value)
 
 
 def test_timeout_is_a_transport_failure() -> None:

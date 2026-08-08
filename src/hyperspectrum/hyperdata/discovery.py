@@ -42,7 +42,6 @@ class _SearchPage:
     limit: int
     total: int
     has_next: bool
-    legacy_complete: bool = False
 
 
 class SearchGateway(Protocol):
@@ -136,18 +135,6 @@ def _read_complete_query(
             requested_page=requested_page,
             requested_limit=page_limit,
         )
-        if parsed.legacy_complete:
-            if requested_page != 1:
-                raise HydIncompleteSearchError(
-                    "HyperData fixture paging changed before completion"
-                )
-            if len(parsed.records) > max_results:
-                raise HydIncompleteSearchError(
-                    "HyperData search exceeds the bounded result cap"
-                )
-            return parsed.records, QueryCompletion(
-                query=query, pages=1, total=len(parsed.records), records=len(parsed.records)
-            )
         if expected_total is None:
             expected_total = parsed.total
             if expected_total > max_results:
@@ -186,7 +173,7 @@ def _page_from_result(
     requested_page: int,
     requested_limit: int,
 ) -> _SearchPage:
-    """Read only the pinned hyd wire envelope or exact internal fixture shape."""
+    """Read only the pinned hyd wire envelope."""
     payload = result.payload
     if not isinstance(payload, Mapping):
         raise HydUnsupportedJsonError("HyperData search JSON must be an object")
@@ -197,17 +184,6 @@ def _page_from_result(
             requested_query,
             requested_page=requested_page,
             requested_limit=requested_limit,
-        )
-    if keys == {"records"}:
-        records = payload["records"]
-        parsed = _require_object_array(records)
-        return _SearchPage(
-            records=parsed,
-            page=1,
-            limit=max(len(parsed), 1),
-            total=len(parsed),
-            has_next=False,
-            legacy_complete=True,
         )
     raise HydUnsupportedJsonError("HyperData search JSON has an unsupported shape")
 

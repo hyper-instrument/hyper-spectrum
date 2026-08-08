@@ -298,8 +298,8 @@ def test_process_boundary_preserves_public_url_without_credentials() -> None:
         "s3://public-bucket/xas/input.npz",
         "gs://public-bucket/xas/input.npz",
         "hyperdata://dataset/v1/spectrum",
-        "https://compute-node:8080/public/input",
         "https://catalog.example.org/public/xas-dataset",
+        "https://8.8.8.8/public/xas-dataset",
     ),
 )
 def test_process_boundary_preserves_credential_free_public_locators(
@@ -309,6 +309,30 @@ def test_process_boundary_preserves_credential_free_public_locators(
     assert agent.ServiceResponse(result={"locator": public_locator}).result == {
         "locator": public_locator
     }
+
+
+@pytest.mark.parametrize(
+    "endpoint_url",
+    (
+        "https://compute-node:8080/private/input",
+        "https://1node:8080/private/input",
+        "https://db_service:5432/private/input",
+        "https://database.corp/private/input",
+        "https://10.0.0.8/private/input",
+        "https://203.0.113.10/private/input",
+        "https://[fd00::1]:8443/private/input",
+        "https://[fe80::1%25en0]:8443/private/input",
+        "https://[2606:4700:4700::1111%25en0]:8443/private/input",
+    ),
+)
+def test_process_boundary_redacts_service_private_and_reserved_url_authorities(
+    endpoint_url: str,
+) -> None:
+    rendered = redact_text(endpoint_url)
+
+    assert rendered != endpoint_url
+    assert "https://" in rendered
+    assert "[REDACTED]" in rendered
 
 
 def test_real_cli_refuses_legacy_v1_plan_with_migration_message(

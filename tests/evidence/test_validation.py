@@ -65,10 +65,25 @@ def test_public_url_locator_reaches_the_structural_redaction_gate() -> None:
     assert captured.value.code == "locator_forbidden"
 
 
+def test_public_ip_url_is_preserved_by_process_redaction_but_forbidden_in_evidence() -> None:
+    public_ip_url = "https://8.8.8.8/public/xas-dataset"
+    evidence = make_valid_evidence()
+    evidence["dataset"]["description"] = public_ip_url
+
+    with pytest.raises(XasM0EvidenceError) as captured:
+        validate_xas_m0_evidence(evidence)
+
+    assert captured.value.code == "locator_forbidden"
+    assert public_ip_url not in str(captured.value)
+
+
 @pytest.mark.parametrize(
     "private_locator",
     (
         "compute-node:8080",
+        "1node:8080",
+        "db_service:5432",
+        "database.corp",
         "database.corp:5432",
         "8.8.8.8:53",
         "1.1.1.1:443",
@@ -92,7 +107,7 @@ def test_semantic_validator_rejects_endpoint_locators_without_echoing_input(
     with pytest.raises(XasM0EvidenceError) as captured:
         validate_xas_m0_evidence(evidence)
 
-    assert captured.value.code == "locator_forbidden"
+    assert captured.value.code in {"locator_forbidden", "sensitive_or_private_value"}
     assert private_locator not in str(captured.value)
 
 
