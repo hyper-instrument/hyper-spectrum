@@ -16,7 +16,7 @@ resources:
   cpu: 1
   memory_gb: 1
   gpu: none
-verify: [python, -c, "from scipy.signal import savgol_filter"]
+verify: [python3, -c, "from hyperspectrum.plugins.xas.baselines import savgol_filter"]
 source:
   kind: local-package
   package: hyperspectrum

@@ -293,8 +293,8 @@ def test_injected_availability_resolver_allows_deterministic_executable_match() 
     assert registry.match(request) == (tool,)
 
 
-def test_registered_tools_are_discoverable_but_not_default_executable_until_available() -> None:
-    # Break caught: an unavailable registered adapter or baseline could be returned for execution.
+def test_new_local_savgol_wrapper_is_executable_while_external_adapter_remains_unavailable() -> None:
+    # Break caught: Task 6's local wrapper could remain unselectable or unblock the external adapter.
     savgol = load_tool_manifest(ROOT / "tools/xas/savgol/tool.yaml")
     xasdenoise = load_tool_manifest(ROOT / "tools/xas/xasdenoise/tool.yaml")
     registry = ToolRegistry((savgol, xasdenoise))
@@ -309,8 +309,8 @@ def test_registered_tools_are_discoverable_but_not_default_executable_until_avai
     )
 
     assert registry.tools == (savgol, xasdenoise)
-    assert registry.match(request) == ()
-    assert "entrypoint-unresolvable" in registry.availability(savgol).reasons
+    assert registry.match(request) == (savgol,)
+    assert registry.availability(savgol).available is True
     assert "entrypoint-unresolvable" in registry.availability(xasdenoise).reasons
 
 
