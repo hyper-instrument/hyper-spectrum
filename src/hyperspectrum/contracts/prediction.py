@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Mapping
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
+from typing_extensions import Self
 
 from .artifact import ArtifactRef
 from .json import FrozenJsonMapping, freeze_json_mapping, thaw_json_mapping
@@ -68,3 +70,13 @@ class PredictionBundle(BaseModel):
     def serialize_provenance(self, value: FrozenJsonMapping) -> object:
         """Keep provenance in standard JSON object form when dumped."""
         return thaw_json_mapping(value)
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        """Revalidate updates so copied bundles retain immutable metadata."""
+        _ = deep
+        data = self.model_dump(round_trip=True)
+        if update is not None:
+            data.update(update)
+        return type(self).model_validate(data)

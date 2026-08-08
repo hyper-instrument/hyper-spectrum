@@ -248,3 +248,64 @@ def test_non_json_mutable_metadata_is_rejected() -> None:
             labels={},
             provenance={},
         )
+
+
+def test_observation_model_copy_revalidates_and_freezes_metadata_update() -> None:
+    observation = ObservationBundle(
+        schema_version="hyperspectrum-observation/v1",
+        sample_id="sample-001",
+        modality="xas",
+        artifacts=(artifact(),),
+        context={},
+        labels={},
+        provenance={},
+    )
+    updated_context = {"nested": ["original"]}
+
+    copied = observation.model_copy(update={"context": updated_context})
+    updated_context["nested"].append("caller-mutation")
+
+    assert copied.model_dump()["context"] == {"nested": ["original"]}
+    with pytest.raises(AttributeError):
+        copied.context["nested"].append("forbidden")  # type: ignore[union-attr]
+    with pytest.raises(ValidationError):
+        observation.model_copy(update={"context": {"unsafe": bytearray(b"mutable")}})
+
+
+def test_prediction_model_copy_revalidates_and_freezes_metadata_update() -> None:
+    prediction = PredictionBundle(
+        schema_version="hyperspectrum-prediction/v1",
+        run_id="run-001",
+        task_id="xas-denoising",
+        predictions=(artifact(role="prediction"),),
+        failures=(),
+        provenance={
+            "model_digest": "c" * 64,
+            "tool_digest": "d" * 64,
+            "data_digest": "e" * 64,
+            "environment_digest": "f" * 64,
+        },
+    )
+    updated_provenance = {
+        "model_digest": "c" * 64,
+        "tool_digest": "d" * 64,
+        "data_digest": "e" * 64,
+        "environment_digest": "f" * 64,
+        "nested": ["original"],
+    }
+    updated_failures = [{"details": {"reasons": ["original"]}}]
+
+    copied = prediction.model_copy(
+        update={"provenance": updated_provenance, "failures": updated_failures}
+    )
+    updated_provenance["nested"].append("caller-mutation")
+    updated_failures[0]["details"]["reasons"].append("caller-mutation")
+
+    assert copied.model_dump()["provenance"]["nested"] == ["original"]
+    assert copied.model_dump()["failures"] == [{"details": {"reasons": ["original"]}}]
+    with pytest.raises(AttributeError):
+        copied.provenance["nested"].append("forbidden")  # type: ignore[union-attr]
+    with pytest.raises(AttributeError):
+        copied.failures[0]["details"]["reasons"].append("forbidden")  # type: ignore[union-attr]
+    with pytest.raises(ValidationError):
+        prediction.model_copy(update={"provenance": {}})
