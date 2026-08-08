@@ -142,6 +142,63 @@ def test_executor_runs_fresh_verified_source_not_a_preimported_callable(
     assert len(bundle.predictions) == 1
 
 
+def test_executor_uses_verified_dependency_bytes_not_cached_module_objects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Break caught: replacing arrays.XASSpectrum after planning could change output under one digest.
+    from hyperspectrum.plugins.xas import arrays
+
+    class WrongSpectrum:
+        def __init__(self, **values: object) -> None:
+            self.sample_id = values["sample_id"]
+            self.group_id = values["group_id"]
+            self.energy = values["energy"]
+            self.intensity = np.zeros_like(values["intensity"])
+            self.energy_unit = values["energy_unit"]
+
+    run_plan = plan(tmp_path)
+    monkeypatch.setattr(arrays, "XASSpectrum", WrongSpectrum)
+
+    bundle = execute_local_run(
+        run_plan,
+        tool=savgol(),
+        selected_sample_ids=fixture_ids(1),
+        source_npz=FIXTURE,
+    )
+
+    with np.load(
+        run_plan.output_directory / bundle.predictions[0].uri, allow_pickle=False
+    ) as output:
+        assert not np.allclose(output["intensity"], 0.0)
+
+
+def test_executor_rejects_changed_local_dependency_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Break caught: arrays.py could change after planning while every recorded digest stayed fixed.
+    dependency = (ROOT / "src/hyperspectrum/plugins/xas/arrays.py").resolve()
+    original_read_bytes = Path.read_bytes
+    run_plan = plan(tmp_path)
+
+    def changed_read_bytes(path: Path) -> bytes:
+        contents = original_read_bytes(path)
+        if path.resolve() == dependency:
+            return contents + b"\n# changed after planning\n"
+        return contents
+
+    monkeypatch.setattr(Path, "read_bytes", changed_read_bytes)
+
+    with pytest.raises(ValueError, match="implementation digest"):
+        execute_local_run(
+            run_plan,
+            tool=savgol(),
+            selected_sample_ids=fixture_ids(1),
+            source_npz=FIXTURE,
+        )
+
+    assert not run_plan.output_directory.exists()
+
+
 def test_partial_input_materialization_aborts_without_a_final_run_directory(
     tmp_path: Path,
 ) -> None:

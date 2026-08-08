@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from importlib.machinery import ModuleSpec, PathFinder
 from importlib.metadata import version
+from importlib.util import resolve_name
 from pathlib import Path
 from typing import Any, Literal
 
@@ -228,6 +229,8 @@ def _require_compatible_tool(task: TaskSpec, tool: ToolManifest) -> None:
         tool.outputs[0].kind,
     ) != ("denoised_signal", "dense_array"):
         raise ValueError("denoising tools require one dense denoised_signal output")
+    if tool.outputs[0].kind != task.output_kind:
+        raise ValueError("tool output kind does not match the requested task")
 
 
 def _require_available_tool(tool: ToolManifest, availability: ToolAvailability) -> None:
@@ -269,49 +272,148 @@ def current_environment_digest() -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedModule:
+    """One exact project-local source module in an implementation closure."""
+
+    module_name: str
+    source_path: Path
+    repository_path: str
+    source_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedEntrypoint:
-    """Static local entrypoint identity; resolving it does not import tool code."""
+    """Static local entrypoint closure; resolving it never imports tool code."""
 
     module_name: str
     object_name: str
-    source_path: Path
-    source_bytes: bytes
+    modules: tuple[ResolvedModule, ...]
     implementation_digest: str
 
 
 def resolve_local_entrypoint(tool: ToolManifest) -> ResolvedEntrypoint:
-    """Resolve local Python source bytes without importing or executing the tool."""
+    """Resolve exact project-local dependency bytes without importing tool code."""
 
     if tool.runtime.kind != "python" or ":" not in tool.entrypoint:
         raise ValueError("local execution requires a Python module:object entrypoint")
     module_name, object_name = tool.entrypoint.split(":", 1)
     if not object_name.isidentifier():
         raise ValueError("tool entrypoint object must be a Python identifier")
-    spec = _module_spec(module_name)
-    if spec is None or spec.origin is None:
-        raise ValueError("tool entrypoint module is not resolvable")
-    source_path = Path(spec.origin).resolve()
     repository_root = Path(__file__).resolve().parents[3]
-    if source_path.suffix != ".py" or not source_path.is_relative_to(repository_root):
-        raise ValueError("tool entrypoint must resolve to local Python source")
-    source_bytes = source_path.read_bytes()
-    try:
-        module = ast.parse(source_bytes, filename=str(source_path))
-    except (SyntaxError, UnicodeDecodeError) as error:
-        raise ValueError("tool entrypoint source is not valid Python") from error
+    resolved_modules, parsed_modules = _resolve_local_dependency_closure(
+        module_name, repository_root
+    )
+    module = parsed_modules[module_name]
     if not any(
         isinstance(statement, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef))
         and statement.name == object_name
         for statement in module.body
     ):
         raise ValueError("tool entrypoint object is not defined in its source module")
+    identities = [
+        {
+            "module": resolved.module_name,
+            "path": resolved.repository_path,
+            "sha256": sha256(resolved.source_bytes).hexdigest(),
+        }
+        for resolved in resolved_modules
+    ]
     return ResolvedEntrypoint(
         module_name=module_name,
         object_name=object_name,
-        source_path=source_path,
-        source_bytes=source_bytes,
-        implementation_digest=sha256(source_bytes).hexdigest(),
+        modules=resolved_modules,
+        implementation_digest=canonical_digest({"modules": identities}),
     )
+
+
+def _resolve_local_dependency_closure(
+    entrypoint_module: str, repository_root: Path
+) -> tuple[tuple[ResolvedModule, ...], dict[str, ast.Module]]:
+    pending = [entrypoint_module]
+    resolved: dict[str, ResolvedModule] = {}
+    parsed: dict[str, ast.Module] = {}
+    while pending:
+        module_name = pending.pop()
+        if module_name in resolved:
+            continue
+        source = _resolve_local_module(module_name, repository_root)
+        if source is None:
+            if module_name == entrypoint_module:
+                raise ValueError("tool entrypoint must resolve to local Python source")
+            continue
+        resolved_module, syntax = source
+        resolved[module_name] = resolved_module
+        parsed[module_name] = syntax
+        pending.extend(
+            dependency
+            for dependency in _local_import_candidates(module_name, syntax)
+            if dependency not in resolved
+            and _resolve_local_module_path(dependency, repository_root) is not None
+        )
+    ordered_names = sorted(resolved)
+    return tuple(resolved[name] for name in ordered_names), parsed
+
+
+def _resolve_local_module(
+    module_name: str, repository_root: Path
+) -> tuple[ResolvedModule, ast.Module] | None:
+    source_path = _resolve_local_module_path(module_name, repository_root)
+    if source_path is None:
+        return None
+    source_bytes = source_path.read_bytes()
+    try:
+        syntax = ast.parse(source_bytes, filename=str(source_path))
+    except (SyntaxError, UnicodeDecodeError) as error:
+        raise ValueError(
+            f"local dependency {module_name!r} is not valid Python"
+        ) from error
+    return (
+        ResolvedModule(
+            module_name=module_name,
+            source_path=source_path,
+            repository_path=source_path.relative_to(repository_root).as_posix(),
+            source_bytes=source_bytes,
+        ),
+        syntax,
+    )
+
+
+def _resolve_local_module_path(module_name: str, repository_root: Path) -> Path | None:
+    spec = _module_spec(module_name)
+    if spec is None or spec.origin is None:
+        return None
+    source_path = Path(spec.origin).resolve()
+    project_source_root = repository_root / "src"
+    if source_path.suffix != ".py" or not source_path.is_relative_to(
+        project_source_root
+    ):
+        return None
+    return source_path
+
+
+def _local_import_candidates(module_name: str, syntax: ast.Module) -> tuple[str, ...]:
+    package_name = module_name.rpartition(".")[0]
+    candidates: set[str] = set()
+    for node in ast.walk(syntax):
+        if isinstance(node, ast.Import):
+            candidates.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            relative_name = "." * node.level + (node.module or "")
+            try:
+                imported_name = (
+                    resolve_name(relative_name, package_name)
+                    if node.level
+                    else relative_name
+                )
+            except (ImportError, ValueError):
+                continue
+            candidates.add(imported_name)
+            candidates.update(
+                f"{imported_name}.{alias.name}"
+                for alias in node.names
+                if alias.name != "*"
+            )
+    return tuple(sorted(candidates))
 
 
 def _module_spec(module_name: str) -> ModuleSpec | None:

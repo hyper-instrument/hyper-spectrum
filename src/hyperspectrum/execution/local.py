@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import ctypes
 import errno
 import io
@@ -12,14 +13,15 @@ import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
+from importlib.util import resolve_name
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Literal, cast
+from uuid import uuid4
 
 import numpy as np
 
 from hyperspectrum.contracts import ArtifactRef, AxisSpec, PredictionBundle
-from hyperspectrum.plugins.xas.arrays import XASSpectrum
 from hyperspectrum.registry.models import ToolManifest
 
 from .plan import (
@@ -39,6 +41,8 @@ class _ResolvedSavGol:
     runner: SavGolCallable
     prediction_type: type[object]
     failure_type: type[object]
+    spectrum_type: type[Any]
+    isolated_module_names: tuple[str, ...]
 
 
 def execute_local_run(
@@ -68,30 +72,36 @@ def execute_local_run(
     source_digest = sha256(source_bytes).hexdigest()
     if source_digest != plan.data_digest:
         raise ValueError("source NPZ data digest does not match the immutable plan")
-    spectra = _load_selected_spectra(source_bytes, selected)
     resolved_tool = _load_savgol_callable(resolved_entrypoint)
-    window_length, polyorder = _savgol_parameters(plan)
-    results = resolved_tool.runner(
-        spectra,
-        window_length=window_length,
-        polyorder=polyorder,
-    )
-    _validate_results(selected, results, resolved_tool)
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(
-        tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent)
-    )
     try:
-        bundle = _write_run(temporary, plan, selected, results, resolved_tool)
-        _fsync_directory(temporary)
-        _atomic_rename_noreplace(temporary, destination)
-        _fsync_directory(destination.parent)
-    except BaseException:
-        if temporary.exists():
-            shutil.rmtree(temporary)
-        raise
-    return bundle
+        spectra = _load_selected_spectra(
+            source_bytes, selected, resolved_tool.spectrum_type
+        )
+        window_length, polyorder = _savgol_parameters(plan)
+        results = resolved_tool.runner(
+            spectra,
+            window_length=window_length,
+            polyorder=polyorder,
+        )
+        _validate_results(selected, results, resolved_tool)
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(
+            tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent)
+        )
+        try:
+            bundle = _write_run(temporary, plan, selected, results, resolved_tool)
+            _fsync_directory(temporary)
+            _atomic_rename_noreplace(temporary, destination)
+            _fsync_directory(destination.parent)
+        except BaseException:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+            raise
+        return bundle
+    finally:
+        for module_name in resolved_tool.isolated_module_names:
+            sys.modules.pop(module_name, None)
 
 
 def _validate_selection(
@@ -137,36 +147,87 @@ def _verify_savgol_identity(plan: RunPlan, tool: ToolManifest) -> ResolvedEntryp
 
 
 def _load_savgol_callable(resolved: ResolvedEntrypoint) -> _ResolvedSavGol:
-    execution_module_name = (
-        f"{resolved.module_name}__hyperspectrum_run_{resolved.implementation_digest}"
-    )
-    module = ModuleType(execution_module_name)
-    module.__file__ = str(resolved.source_path)
-    module.__package__ = resolved.module_name.rpartition(".")[0]
-    code = compile(resolved.source_bytes, str(resolved.source_path), "exec")
-    sys.modules[execution_module_name] = module
+    sources = {module.module_name: module for module in resolved.modules}
+    execution_id = uuid4().hex
+    module_cache: dict[str, ModuleType] = {}
+    isolated_names: list[str] = []
+    original_import = builtins.__import__
+
+    def load_module(module_name: str) -> ModuleType:
+        if module_name in module_cache:
+            return module_cache[module_name]
+        source = sources[module_name]
+        isolated_name = f"{module_name}__hyperspectrum_run_{execution_id}"
+        module = ModuleType(isolated_name)
+        module.__file__ = str(source.source_path)
+        module.__package__ = module_name.rpartition(".")[0]
+        module.__dict__["__builtins__"] = {
+            **vars(builtins),
+            "__import__": verified_import,
+        }
+        module_cache[module_name] = module
+        isolated_names.append(isolated_name)
+        sys.modules[isolated_name] = module
+        code = compile(source.source_bytes, str(source.source_path), "exec")
+        exec(code, module.__dict__)  # noqa: S102 - digest-verified source boundary
+        return module
+
+    def verified_import(
+        name: str,
+        globals: dict[str, object] | None = None,
+        locals: dict[str, object] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> object:
+        package_name = str((globals or {}).get("__package__", ""))
+        imported_name = (
+            resolve_name("." * level + name, package_name) if level else name
+        )
+        if imported_name not in sources:
+            return original_import(name, globals, locals, fromlist, level)
+        imported = load_module(imported_name)
+        for item in fromlist:
+            child_name = f"{imported_name}.{item}"
+            if child_name in sources:
+                setattr(imported, item, load_module(child_name))
+        if fromlist:
+            return imported
+        raise ImportError(
+            "verified local modules must be imported with an explicit from-list"
+        )
+
     try:
-        exec(code, module.__dict__)  # noqa: S102 - authorized, digest-verified tool boundary
+        module = load_module(resolved.module_name)
+        runner = getattr(module, resolved.object_name, None)
+        if not callable(runner):
+            raise TypeError("resolved SavGol entrypoint is not callable")
+        prediction_type = getattr(module, "BaselinePrediction", None)
+        failure_type = getattr(module, "BaselineFailure", None)
+        spectrum_type = getattr(module, "XASSpectrum", None)
+        if (
+            not isinstance(prediction_type, type)
+            or not isinstance(failure_type, type)
+            or not isinstance(spectrum_type, type)
+        ):
+            raise TypeError("SavGol source does not define its result types")
+        return _ResolvedSavGol(
+            runner=cast(SavGolCallable, runner),
+            prediction_type=prediction_type,
+            failure_type=failure_type,
+            spectrum_type=spectrum_type,
+            isolated_module_names=tuple(isolated_names),
+        )
     except BaseException:
-        sys.modules.pop(execution_module_name, None)
+        for isolated_name in isolated_names:
+            sys.modules.pop(isolated_name, None)
         raise
-    loaded = getattr(module, resolved.object_name, None)
-    if not callable(loaded):
-        raise TypeError("resolved SavGol entrypoint is not callable")
-    prediction_type = getattr(module, "BaselinePrediction", None)
-    failure_type = getattr(module, "BaselineFailure", None)
-    if not isinstance(prediction_type, type) or not isinstance(failure_type, type):
-        raise TypeError("SavGol source does not define its result types")
-    return _ResolvedSavGol(
-        runner=cast(SavGolCallable, loaded),
-        prediction_type=prediction_type,
-        failure_type=failure_type,
-    )
 
 
 def _load_selected_spectra(
-    source_bytes: bytes, selected: tuple[str, ...]
-) -> tuple[XASSpectrum, ...]:
+    source_bytes: bytes,
+    selected: tuple[str, ...],
+    spectrum_type: type[Any],
+) -> tuple[object, ...]:
     required = {"energy", "noisy", "sample_ids", "group_ids", "energy_unit"}
     with np.load(io.BytesIO(source_bytes), allow_pickle=False) as source:
         if not required.issubset(source.files):
@@ -191,12 +252,12 @@ def _load_selected_spectra(
                 "source NPZ does not contain the complete selected input set"
             )
         return tuple(
-            XASSpectrum(
+            spectrum_type(
                 sample_id=sample_id,
                 group_id=group_ids[index_by_id[sample_id]],
                 energy=energy[index_by_id[sample_id]],
                 intensity=noisy[index_by_id[sample_id]],
-                energy_unit=energy_unit,  # type: ignore[arg-type]
+                energy_unit=energy_unit,
             )
             for sample_id in selected
         )

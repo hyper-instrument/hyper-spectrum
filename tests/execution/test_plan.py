@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
@@ -141,15 +142,35 @@ def test_plan_preserves_every_reproducibility_input_and_detaches_parameters(
         result.parameters["new"] = "forbidden"  # type: ignore[index]
 
 
-def test_implementation_digest_is_the_exact_resolved_entrypoint_source_bytes(
+def test_implementation_digest_covers_entrypoint_and_local_dependency_bytes(
     tmp_path: Path,
 ) -> None:
-    # Break caught: a manifest digest could be falsely attributed to unrelated hardcoded code.
-    source = ROOT / "src/hyperspectrum/plugins/xas/baselines.py"
+    # Break caught: changing arrays.py could retain the implementation identity of code that imports it.
+    paths = (
+        "src/hyperspectrum/plugins/xas/arrays.py",
+        "src/hyperspectrum/plugins/xas/baselines.py",
+    )
+    modules = [
+        {
+            "module": f"hyperspectrum.plugins.xas.{Path(path).stem}",
+            "path": path,
+            "sha256": sha256((ROOT / path).read_bytes()).hexdigest(),
+        }
+        for path in paths
+    ]
+    expected = sha256(
+        json.dumps(
+            {"modules": modules},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
     result = plan(tmp_path)
 
-    assert result.implementation_digest == sha256(source.read_bytes()).hexdigest()
+    assert result.implementation_digest == expected
 
 
 @pytest.mark.parametrize(
@@ -223,6 +244,16 @@ def test_planning_requires_one_dense_denoised_signal_output(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="denoised_signal"):
         plan(tmp_path, tool=incompatible)
+
+
+def test_planning_rejects_tool_output_kind_that_differs_from_task(
+    tmp_path: Path,
+) -> None:
+    # Break caught: an image task could authorize a tool that publishes dense-array artifacts.
+    image_task = task().model_copy(update={"output_kind": "image"})
+
+    with pytest.raises(ValueError, match="output kind"):
+        plan(tmp_path, task=image_task)
 
 
 def test_planning_rejects_required_missing_and_unverified_model_weights(
