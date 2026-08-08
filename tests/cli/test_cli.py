@@ -296,7 +296,31 @@ def test_agent_errors_map_to_stable_exit_codes_and_one_json_envelope(
     )
     parsed = assert_envelope(result, ok=False, expected_result=expected_result)
     assert parsed["error"] == {"code": error_code, "message": str(error)}
-    assert result.stderr == f"{error}\n"
+    assert result.stderr == ""
+
+
+def test_json_service_failure_has_no_naked_stderr_and_redacts_http_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    placeholder_endpoint = "http://203.0.113.10:8443"
+
+    def fail() -> ServiceResponse:
+        raise AgentAuthError(
+            f"connection to {placeholder_endpoint} timed out "
+            '{"phase":"connect"}'
+        )
+
+    monkeypatch.setattr(cli.services, "doctor", fail)
+
+    result = runner.invoke(cli.app, ["doctor", "--json"])
+
+    assert result.exit_code == 3
+    parsed = assert_envelope(result, ok=False)
+    assert parsed["error"]["code"] == "auth_or_connection"  # type: ignore[index]
+    assert placeholder_endpoint not in result.stdout + result.stderr
+    assert "203.0.113.10:8443" not in result.stdout + result.stderr
+    assert "http://[REDACTED]" in parsed["error"]["message"]  # type: ignore[index]
+    assert result.stderr == ""
 
 
 def test_json_mode_never_prints_service_logs_to_stdout(

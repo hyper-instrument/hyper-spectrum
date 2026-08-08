@@ -283,6 +283,29 @@ def test_text_redactor_does_not_raise_on_deeply_malformed_diagnostic() -> None:
     assert "keep-deep" in rendered
 
 
+def test_structured_suffix_redacts_the_unstructured_prefix_and_mapping_keys() -> None:
+    placeholder_endpoint = "http://203.0.113.10:8443"
+    diagnostic = (
+        f"connection to {placeholder_endpoint} failed "
+        + json.dumps(
+            {
+                placeholder_endpoint: "endpoint-key-context",
+                "token=placeholder-key-secret": "credential-key-context",
+                "ok": False,
+            }
+        )
+    )
+
+    rendered = redact_text(diagnostic)
+
+    assert placeholder_endpoint not in rendered
+    assert "203.0.113.10:8443" not in rendered
+    assert "placeholder-key-secret" not in rendered
+    assert "http://[REDACTED]" in rendered
+    assert "endpoint-key-context" in rendered
+    assert "credential-key-context" not in rendered
+
+
 def test_process_boundary_preserves_public_url_without_credentials() -> None:
     public_url = "https://catalog.example.org/public/xas-dataset"
 
@@ -309,6 +332,40 @@ def test_process_boundary_preserves_credential_free_public_locators(
     assert agent.ServiceResponse(result={"locator": public_locator}).result == {
         "locator": public_locator
     }
+
+
+@pytest.mark.parametrize(
+    "endpoint_url",
+    (
+        "http://catalog.example.org/public/xas-dataset",
+        "http://8.8.8.8:8443/public/xas-dataset",
+    ),
+)
+def test_process_boundary_redacts_every_plain_http_authority(
+    endpoint_url: str,
+) -> None:
+    rendered = redact_text(endpoint_url)
+
+    assert rendered != endpoint_url
+    assert endpoint_url.split("/", 3)[2] not in rendered
+    assert rendered.startswith("http://[REDACTED]")
+
+
+@pytest.mark.parametrize(
+    "endpoint_url",
+    (
+        "ftp://catalog.example.org/public/xas-dataset",
+        "ssh://catalog.example.org/public/xas-dataset",
+    ),
+)
+def test_process_boundary_preserves_only_approved_public_locator_schemes(
+    endpoint_url: str,
+) -> None:
+    rendered = redact_text(endpoint_url)
+
+    assert rendered != endpoint_url
+    assert endpoint_url.split("/", 3)[2] not in rendered
+    assert "://[REDACTED]" in rendered
 
 
 @pytest.mark.parametrize(
@@ -359,5 +416,6 @@ def test_real_cli_refuses_legacy_v1_plan_with_migration_message(
     assert completed.returncode == 2
     envelope = json.loads(completed.stdout)
     assert envelope["error"]["code"] == "invalid_or_not_ready"
-    assert "v1 lacks a bound sample selection" in completed.stderr
+    assert "v1 lacks a bound sample selection" in envelope["error"]["message"]
+    assert completed.stderr == ""
     assert "Traceback" not in completed.stderr

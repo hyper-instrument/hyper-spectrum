@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from urllib.parse import unquote, unquote_plus, urlsplit
 
 _REDACTED = "[REDACTED]"
+_PUBLIC_LOCATOR_SCHEMES = frozenset(("gs", "hyperdata", "https", "s3"))
 _SENSITIVE_NAMES = (
     "authorization",
     "credential",
@@ -117,7 +118,7 @@ def redact_text(value: str) -> str:
 
 
 def _redact_endpoint_url(match: re.Match[str]) -> str:
-    """Redact private/service URL authorities while preserving public data URLs."""
+    """Redact unsafe URL authorities while preserving public HTTPS/data URLs."""
 
     locator = match.group(0)
     try:
@@ -127,6 +128,8 @@ def _redact_endpoint_url(match: re.Match[str]) -> str:
     except ValueError:
         return _redacted_url_authority(locator)
     if hostname is None:
+        return _redacted_url_authority(locator)
+    if parsed.scheme.casefold() not in _PUBLIC_LOCATOR_SCHEMES:
         return _redacted_url_authority(locator)
     normalized_host = unquote(hostname).rstrip(".").casefold()
     has_scope = "%" in normalized_host
@@ -216,7 +219,7 @@ def _redact_structured_diagnostic(value: str) -> str | None:
             ):
                 continue
             trailing_newline = "\n" if value.endswith("\n") else ""
-            return f"{prefix}{rendered}{trailing_newline}"
+            return f"{redact_text(prefix)}{rendered}{trailing_newline}"
     return None
 
 
@@ -229,7 +232,7 @@ def redact_value(value: object, *, key: str | None = None) -> object:
         return redact_text(value)
     if isinstance(value, Mapping):
         return {
-            str(item_key): redact_value(item, key=str(item_key))
+            redact_text(str(item_key)): redact_value(item, key=str(item_key))
             for item_key, item in value.items()
         }
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):

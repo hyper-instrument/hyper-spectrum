@@ -4,22 +4,40 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Protocol
+
+from hyperspectrum.process_boundary import redact_text
 
 from .models import HydCommandResult
 
 _AUTH_MARKERS = ("not authenticated", "unauthenticated", "authentication required")
 _UNSUPPORTED_MARKERS = ("unknown command", "unrecognized command", "unsupported command")
-_SYSTEM_HD_BINARY = os.path.realpath("/usr/bin/hd").casefold()
-_BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
-_NAMED_SECRET_PATTERN = re.compile(
-    r"(?i)\b(?:access[_ -]?token|token|api[_ -]?key|secret|password)\b"
-    r"(?:\s*[=:]\s*|\s+)[^\s,;]+"
+_TRANSPORT_MARKERS = (
+    "timed out",
+    "timeout",
+    "connection refused",
+    "connection reset",
+    "connection aborted",
+    "connection error",
+    "connection failed",
+    "failed to connect",
+    "could not connect",
+    "unable to connect",
+    "network is unreachable",
+    "no route to host",
+    "transport error",
 )
+_TRANSPORT_CODES = (
+    "connection-error",
+    "network-error",
+    "timeout",
+    "transport-error",
+    "transport-failure",
+)
+_SYSTEM_HD_BINARY = os.path.realpath("/usr/bin/hd").casefold()
 
 
 class CommandRunner(Protocol):
@@ -64,19 +82,13 @@ def _is_explicit_system_hd(binary: str) -> bool:
     return bool(os.path.dirname(binary)) and _is_system_hd(binary)
 
 
-def _redact_secrets(detail: str) -> str:
-    """Prevent command diagnostics from surfacing credentials to callers."""
-    redacted = _BEARER_PATTERN.sub("Bearer [REDACTED]", detail)
-    return _NAMED_SECRET_PATTERN.sub("[REDACTED]", redacted)
-
-
 class HydGatewayError(RuntimeError):
     """Base error for a safe HyperData boundary failure."""
 
     code = "gateway_failure"
 
     def __init__(self, detail: str) -> None:
-        super().__init__(f"{self.code}: {_redact_secrets(detail)}")
+        super().__init__(f"{self.code}: {redact_text(detail)}")
 
 
 class HydClientNotFoundError(HydGatewayError):
@@ -224,10 +236,57 @@ class HydGateway:
 
     @staticmethod
     def _raise_for_failure(completed: subprocess.CompletedProcess[str]) -> None:
-        detail = completed.stderr or completed.stdout or f"HyperData exited {completed.returncode}"
-        normalized = detail.lower()
+        structured_fields = _structured_error_fields(completed.stdout)
+        classification_text = "\n".join(
+            part
+            for part in (
+                completed.stderr,
+                "\n".join(structured_fields),
+                completed.stdout if not structured_fields else "",
+            )
+            if part
+        )
+        normalized = classification_text.casefold()
+        detail = _safe_failure_detail(completed)
         if any(marker in normalized for marker in _AUTH_MARKERS):
             raise HydAuthenticationError(detail)
         if completed.returncode == 127 or any(marker in normalized for marker in _UNSUPPORTED_MARKERS):
             raise HydUnsupportedClientError(detail)
+        if any(code in _TRANSPORT_CODES for code in structured_fields) or any(
+            marker in normalized for marker in _TRANSPORT_MARKERS
+        ):
+            raise HydTransportError(detail)
         raise HydCommandError(detail)
+
+
+def _structured_error_fields(stdout: str) -> tuple[str, ...]:
+    """Extract the pinned machine-error fields without trusting display text."""
+    try:
+        payload = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return ()
+    if not isinstance(payload, Mapping) or payload.get("ok") is not False:
+        return ()
+    error = payload.get("error")
+    if not isinstance(error, Mapping):
+        return ()
+    return tuple(
+        value.casefold()
+        for name in ("code", "message", "hint")
+        if isinstance((value := error.get(name)), str) and value.strip()
+    )
+
+
+def _safe_failure_detail(completed: subprocess.CompletedProcess[str]) -> str:
+    """Preserve both diagnostic channels after independently redacting each one."""
+    parts = tuple(
+        f"{name}: {redact_text(value.strip())}"
+        for name, value in (
+            ("stderr", completed.stderr),
+            ("stdout", completed.stdout),
+        )
+        if value.strip()
+    )
+    if parts:
+        return "\n".join(parts)
+    return f"HyperData exited {completed.returncode}"

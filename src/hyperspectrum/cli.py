@@ -163,13 +163,14 @@ def _invoke(
 
 
 def _emit_error(json_output: bool, error: services.AgentServiceError) -> None:
-    typer.echo(str(error), err=True)
     if json_output:
         _emit_envelope(
             ok=False,
             result=error.result,
             error={"code": error.error_code, "message": str(error)},
         )
+    else:
+        typer.echo(str(error), err=True)
 
 
 def _emit_envelope(

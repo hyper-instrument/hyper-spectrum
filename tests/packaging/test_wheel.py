@@ -613,8 +613,53 @@ def test_installed_generic_failure_redacts_quoted_diagnostics(
     assert leaked == [], rendered
     for safe_context in ("keep-installed-json", "keep-installed-repr"):
         assert safe_context in completed.stdout
-        assert safe_context in completed.stderr
         assert safe_context in envelope["error"]["message"]  # type: ignore[index]
+    assert completed.stderr == ""
+
+
+def test_installed_discovery_structured_timeout_is_safe_transport_failure(
+    installed_console: tuple[Path, dict[str, str], Path],
+) -> None:
+    console, environment, root = installed_console
+    placeholder_endpoint = "http://203.0.113.10:8443"
+    hyd = root / "bin/hyd"
+    hyd.write_text(
+        (
+            "#!/bin/sh\n"
+            f"printf '%s\\n' 'connection diagnostic for {placeholder_endpoint} "
+            "{\"phase\":\"connect\"}' >&2\n"
+            "printf '%s\\n' "
+            f"'{{\"ok\":false,\"error\":{{\"code\":\"cli-error\","
+            f"\"message\":\"请求失败 ({placeholder_endpoint}): timed out\","
+            "\"hint\":null}}}'\n"
+            "exit 1\n"
+        ),
+        encoding="utf-8",
+    )
+    hyd.chmod(0o755)
+    isolated_environment = dict(environment)
+    isolated_environment["PATH"] = str(root / "bin")
+
+    completed = command(
+        str(console),
+        "data",
+        "discover",
+        "--modality",
+        "xas",
+        "--profile",
+        "volcano",
+        "--json",
+        env=isolated_environment,
+    )
+
+    envelope = assert_error_envelope(completed, 3, "auth_or_connection")
+    rendered = completed.stdout + completed.stderr
+    assert placeholder_endpoint not in rendered
+    assert "203.0.113.10:8443" not in rendered
+    assert "http://[REDACTED]" in envelope["error"]["message"]  # type: ignore[index]
+    assert "connection diagnostic" in envelope["error"]["message"]  # type: ignore[index]
+    assert "timed out" in envelope["error"]["message"]  # type: ignore[index]
+    assert completed.stderr == ""
 
 
 @pytest.mark.parametrize(

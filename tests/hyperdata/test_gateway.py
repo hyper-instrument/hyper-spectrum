@@ -369,3 +369,43 @@ def test_timeout_is_a_transport_failure() -> None:
         HydGateway(runner=runner).search("iron", page=1, limit=20)
 
     assert error.value.code == "transport_failure"
+
+
+def test_nonzero_timeout_uses_both_channels_and_redacts_the_http_authority() -> None:
+    """Catches dropping structured stdout when stderr has a connection diagnostic."""
+    placeholder_endpoint = "http://203.0.113.10:8443"
+    runner = RecordingRunner(
+        completed(
+            returncode=1,
+            stderr=(
+                f"connection diagnostic for {placeholder_endpoint} "
+                '{"phase":"connect"}\n'
+            ),
+            stdout=json.dumps(
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "cli-error",
+                        "message": (
+                            f"请求失败 ({placeholder_endpoint}): timed out"
+                        ),
+                        "hint": None,
+                    },
+                }
+            )
+            + "\n",
+        )
+    )
+
+    with pytest.raises(HydTransportError) as captured:
+        HydGateway(profile="volcano", runner=runner).search(
+            "iron", page=1, limit=20
+        )
+
+    rendered = str(captured.value)
+    assert captured.value.code == "transport_failure"
+    assert "connection diagnostic" in rendered
+    assert "timed out" in rendered
+    assert placeholder_endpoint not in rendered
+    assert "203.0.113.10:8443" not in rendered
+    assert "http://[REDACTED]" in rendered
