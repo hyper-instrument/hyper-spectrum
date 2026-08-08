@@ -62,6 +62,42 @@ def test_normalized_spectrum_rmse_rejects_axis_mismatch_or_degenerate_target(
         normalized_spectrum_rmse(predicted, true)
 
 
+def test_normalized_spectrum_rmse_rejects_nonfinite_derived_target_range() -> None:
+    # Break caught: finite target values could overflow to an infinite normalization range.
+    true = spectrum("s1", "A", [-1e308, 0.0, 1e308])
+    predicted = spectrum("s1", "A", [-1e308, 0.0, 1e308])
+
+    with (
+        np.errstate(over="ignore", invalid="ignore"),
+        pytest.raises(ValueError, match="finite target dynamic range"),
+    ):
+        normalized_spectrum_rmse(predicted, true)
+
+
+def test_normalized_spectrum_rmse_rejects_nonfinite_derived_residual() -> None:
+    # Break caught: subtraction of finite prediction and target values could overflow silently.
+    true = spectrum("s1", "A", [-1e308, -1e308 + 1e292, -1e308 + 2e292])
+    predicted = spectrum("s1", "A", [1e308, 1e308, 1e308])
+
+    with (
+        np.errstate(over="ignore", invalid="ignore"),
+        pytest.raises(ValueError, match="finite residual"),
+    ):
+        normalized_spectrum_rmse(predicted, true)
+
+
+def test_normalized_spectrum_rmse_stably_scores_large_finite_residuals() -> None:
+    # Break caught: naive residual squaring could turn a valid large score into infinity.
+    true = spectrum("s1", "A", [0.0, 1.0, 2.0])
+    predicted = spectrum("s1", "A", [1e200, 1e200, 1e200])
+
+    with np.errstate(over="raise", invalid="raise"):
+        score = normalized_spectrum_rmse(predicted, true)
+
+    assert np.isfinite(score)
+    assert score == pytest.approx(5e199)
+
+
 def test_group_aggregate_means_samples_then_weights_compound_groups_equally() -> None:
     # Break caught: a group with more spectra could receive more weight in the primary score.
     records = (

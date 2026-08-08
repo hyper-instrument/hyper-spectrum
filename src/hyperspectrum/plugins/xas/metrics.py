@@ -28,11 +28,36 @@ def normalized_spectrum_rmse(predicted: XASSpectrum, true: XASSpectrum) -> float
         raise ValueError("prediction and target energy axes must match exactly")
     if not np.isfinite(predicted.intensity).all() or not np.isfinite(true.intensity).all():
         raise ValueError("prediction and target arrays must be finite")
-    dynamic_range = float(np.max(true.intensity) - np.min(true.intensity))
+    with np.errstate(over="ignore", invalid="ignore"):
+        dynamic_range = float(np.max(true.intensity) - np.min(true.intensity))
+    if not np.isfinite(dynamic_range):
+        raise ValueError("target must have a finite target dynamic range")
     if dynamic_range <= 1e-12:
         raise ValueError("target dynamic range must be greater than 1e-12")
-    residual = predicted.intensity - true.intensity
-    return float(np.sqrt(np.mean(residual**2)) / dynamic_range)
+    with np.errstate(over="ignore", invalid="ignore"):
+        residual = predicted.intensity - true.intensity
+    if not np.isfinite(residual).all():
+        raise ValueError("prediction and target must produce a finite residual")
+
+    residual_scale = float(np.max(np.abs(residual)))
+    if not np.isfinite(residual_scale):
+        raise ValueError("residual scale must be finite")
+    if residual_scale == 0.0:
+        rmse = 0.0
+    else:
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            scaled_residual = residual / residual_scale
+            scaled_mean_square = float(np.mean(scaled_residual * scaled_residual))
+            rmse = float(residual_scale * np.sqrt(scaled_mean_square))
+        if not np.isfinite(scaled_residual).all() or not np.isfinite(scaled_mean_square):
+            raise ValueError("scaled residual statistics must be finite")
+    if not np.isfinite(rmse):
+        raise ValueError("RMSE must be finite")
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        score = float(rmse / dynamic_range)
+    if not np.isfinite(score):
+        raise ValueError("normalized spectrum RMSE must be finite")
+    return score
 
 
 @dataclass(frozen=True, slots=True)
