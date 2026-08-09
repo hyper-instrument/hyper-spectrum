@@ -85,6 +85,36 @@ def test_real_module_wraps_json_mode_click_errors(args: tuple[str, ...]) -> None
     assert_one_error_envelope(run_module(*args))
 
 
+def test_real_doctor_starts_with_the_supported_locked_typer(
+    tmp_path: Path,
+) -> None:
+    """Catches CLI startup imports that fail with the permitted dependency set."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    hyd = fake_bin / "hyd"
+    hyd.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    hyd.chmod(0o755)
+    environment = dict(os.environ)
+    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+    environment["PYTHONPATH"] = str(ROOT / "src")
+
+    completed = subprocess.run(
+        (sys.executable, "-m", "hyperspectrum.cli", "doctor", "--json"),
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stderr == ""
+    assert completed.stdout.count("\n") == 1
+    envelope = json.loads(completed.stdout)
+    assert envelope["schema_version"] == "hyperspectrum-cli/v1"
+    assert envelope["ok"] is True
+    assert envelope["result"]["ready"] is True
+
+
 def secret_candidate() -> DatasetCandidate:
     return DatasetCandidate(
         dataset_code="XAS-SECRET",

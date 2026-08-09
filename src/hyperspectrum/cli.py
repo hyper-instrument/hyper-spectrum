@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
-from typer._click import ClickException
+from click import ClickException
 
 from hyperspectrum import agent as services
 from hyperspectrum.process_boundary import redact_text, redact_value
