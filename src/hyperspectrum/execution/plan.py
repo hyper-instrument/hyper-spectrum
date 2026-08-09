@@ -352,7 +352,7 @@ def _require_tool_parameters(tool: ToolManifest, parameters: FrozenJsonMapping) 
         return
     expected_keys = {
         "input_contract_status",
-        "required_input_normalization",
+        "required_input_artifact",
         "model_normalization_method",
         "preprocessing",
         "device",
@@ -364,10 +364,12 @@ def _require_tool_parameters(tool: ToolManifest, parameters: FrozenJsonMapping) 
     if parameters["input_contract_status"] != "unverified":
         raise ValueError("XASDenoise raw input contract remains unverified")
     if (
-        parameters["required_input_normalization"]
-        != "upstream_pre_edge_post_edge_normalized"
+        parameters["required_input_artifact"]
+        != "structured_sample_bound_upstream_normalization_artifact"
     ):
-        raise ValueError("XASDenoise requires upstream pre/post-edge normalization")
+        raise ValueError(
+            "XASDenoise requires a structured sample-bound normalization artifact"
+        )
     if parameters["model_normalization_method"] is not None:
         raise ValueError(
             "the official XASDenoise checkpoint declares null normalization"

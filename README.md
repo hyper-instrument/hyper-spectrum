@@ -54,7 +54,10 @@ curves, or an exact native-unit inverse. XASDenoise therefore remains
 fail-closed with `input_contract_unverified`, even when the mounted checkpoint
 bytes pass verification. Do not plan or execute it on raw `ketek/i0` ratios.
 The `denoise_spectra` entrypoint and runtime-identity contract are retained for
-future inputs that carry the evidenced upstream normalization state.
+future inputs that carry a structured, sample-bound normalization artifact.
+Until that artifact is implemented, the public entrypoint fails before loading
+a checkpoint or running inference; a mutable normalization label or detached
+digest cannot authorize execution.
 
 ## Agent CLI
 

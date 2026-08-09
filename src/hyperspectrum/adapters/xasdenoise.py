@@ -27,14 +27,7 @@ from hyperspectrum.denoising.model import (
     CanonicalDenoisingInput,
     CanonicalDenoisingOutput,
     ModelCapabilities,
-    validate_model_output,
 )
-from hyperspectrum.denoising.normalization import (
-    NormalizedSpectrum,
-    denormalize,
-    normalize,
-)
-from hyperspectrum.denoising.sample import SpectrumAxis, SpectrumSample
 from hyperspectrum.plugins.xas.arrays import XASSpectrum
 
 XASDENOISE_SOURCE_COMMIT = "bda749ee956f9e02acc6995f238d759682ee2ca8"
@@ -43,7 +36,10 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MODEL_LAYERS = 4
 _MODEL_KERNEL_SIZE = 9
 _MODEL_EDGE_CROP = 16
-XASDENOISE_REQUIRED_NORMALIZATION = "upstream_pre_edge_post_edge_normalized"
+XASDENOISE_STEP_INPUT_SPACE = "upstream_pre_edge_post_edge_normalized"
+XASDENOISE_REQUIRED_INPUT_ARTIFACT = (
+    "structured_sample_bound_upstream_normalization_artifact"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,7 +550,7 @@ class XASDenoiseAdapter:
         axis_ranks=(1,),
         representations=("dense",),
         channel_counts=(1,),
-        required_normalization=XASDENOISE_REQUIRED_NORMALIZATION,
+        required_normalization=XASDENOISE_REQUIRED_INPUT_ARTIFACT,
         native_unit_recovery=False,
     )
 
@@ -577,33 +573,14 @@ class XASDenoiseAdapter:
 
     @staticmethod
     def validate_input(model_input: CanonicalDenoisingInput) -> None:
-        """Reject unsupported physics/shape before fitting or tensor allocation."""
+        """Reject every input until a structured sample-bound artifact exists."""
 
-        if model_input.modality not in {"xas", "xanes"}:
-            raise ValueError("XASDenoise supports only XAS/XANES inputs")
-        if model_input.representation != "dense":
-            raise ValueError("XASDenoise requires a real dense representation")
-        if model_input.signal.ndim != 1 or model_input.channel_labels:
-            raise ValueError("XASDenoise requires one unchannelled spectrum")
-        if len(model_input.axis_values) != 1:
-            raise ValueError("XASDenoise requires one explicit physical axis")
-        if (
-            model_input.axis_names != ("energy",)
-            or model_input.axis_units != ("eV",)
-            or model_input.axis_directions != ("increasing",)
-        ):
-            raise ValueError("XASDenoise requires a strictly increasing energy/eV axis")
-        if not np.all(np.diff(model_input.axis_values[0]) > 0.0):
-            raise ValueError("XASDenoise energy must be strictly increasing")
-        if model_input.normalization_method != XASDENOISE_REQUIRED_NORMALIZATION:
-            raise ValueError(
-                "input_contract_unverified: the pinned checkpoint requires the "
-                "upstream per-spectrum pre-edge/post-edge normalization state; "
-                "raw ketek/i0 ratios and generic normalization are not compatible"
-            )
-        if not np.all(model_input.valid_mask):
-            raise ValueError("XASDenoise does not support masked signal values")
-        _validate_energy_signal(model_input.axis_values[0], model_input.signal)
+        _ = model_input
+        raise ValueError(
+            "input_contract_unverified: no structured, sample-bound upstream "
+            "pre-edge/post-edge normalization artifact is implemented; mutable "
+            "normalization labels and digests cannot authorize inference"
+        )
 
     @property
     def device(self) -> str:
@@ -700,77 +677,13 @@ def denoise_spectra(
     weights_path: Path | None = None,
     weight_bytes: bytes | None = None,
     device: str = "auto",
-    _adapter: XASDenoiseAdapter | None = None,
 ) -> XASDenoiseBatchResult:
-    """Run the one official adapter over ordered XAS inputs on any host backend."""
+    """Fail closed before checkpoint loading or inference for public inputs."""
 
-    adapter = _adapter or XASDenoiseAdapter(
-        weights_path, weight_bytes=weight_bytes, device=device
-    )
-    results: list[XASDenoiseResult] = []
-    for source in samples:
-        try:
-            direction: Literal["increasing", "decreasing"] = (
-                "increasing" if source.energy[0] < source.energy[-1] else "decreasing"
-            )
-            sample = SpectrumSample(
-                sample_id=source.sample_id,
-                group_id=source.group_id,
-                modality="xas",
-                representation="dense",
-                axes=(
-                    SpectrumAxis(
-                        name="energy",
-                        unit=source.energy_unit,
-                        direction=direction,
-                        values=source.energy,
-                    ),
-                ),
-                signal=source.intensity,
-                valid_mask=np.ones(source.intensity.shape, dtype=bool),
-                signal_unit="ketek/i0 ratio",
-                metadata={},
-                provenance={},
-            )
-            normalized = normalize(sample, "identity_raw")
-            model_input = CanonicalDenoisingInput.from_normalized(normalized)
-            output = adapter.predict(model_input)
-            validate_model_output(model_input, output)
-            normalized_prediction = NormalizedSpectrum(
-                normalized.sample.with_signal(output.signal), normalized.state
-            )
-            native_prediction = denormalize(normalized_prediction)
-            prediction = XASSpectrum(
-                sample_id=source.sample_id,
-                group_id=source.group_id,
-                energy=source.energy,
-                intensity=np.asarray(native_prediction.signal, dtype=np.float64),
-                energy_unit="eV",
-            )
-            results.append(
-                XASDenoisePrediction(
-                    spectrum=prediction,
-                    method="xasdenoise",
-                    optimization_kind="no_training",
-                    preprocessing_state=adapter.preprocessing_state(source.sample_id),
-                    device=adapter.device,
-                    torch_version=getattr(adapter, "torch_version", None),
-                )
-            )
-        except (RuntimeError, TypeError, ValueError) as error:
-            results.append(
-                XASDenoiseFailure(
-                    sample_id=source.sample_id,
-                    group_id=source.group_id,
-                    energy=source.energy,
-                    energy_unit="eV",
-                    method="xasdenoise",
-                    error_type="model_failure",
-                    message=str(error),
-                )
-            )
-    return XASDenoiseBatchResult(
-        results=tuple(results), runtime_identity=adapter.runtime_identity
+    _ = (samples, weights_path, weight_bytes, device)
+    raise ValueError(
+        "input_contract_unverified: production XASDenoise inference is disabled "
+        "until a structured, sample-bound upstream normalization artifact exists"
     )
 
 
@@ -782,7 +695,7 @@ def verification_report() -> dict[str, object]:
         "source_commit": XASDENOISE_SOURCE_COMMIT,
         "code_license": XASDENOISE_CODE_LICENSE,
         "checkpoint_normalization_method": None,
-        "required_input_normalization": XASDENOISE_REQUIRED_NORMALIZATION,
+        "required_input_artifact": XASDENOISE_REQUIRED_INPUT_ARTIFACT,
         "raw_input_contract_status": "unverified",
         "availability_reason": "input_contract_unverified",
         "preprocessing_schema_version": ("hyperspectrum-xasdenoise-step-baseline/v1"),

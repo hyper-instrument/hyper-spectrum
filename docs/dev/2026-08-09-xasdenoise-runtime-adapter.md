@@ -33,10 +33,11 @@ The Zenodo HDF5 metadata marks spectra normalized and carries differing E0,
 pre/post windows, and V/V fit metadata per spectrum. The raw HyperSpectrum
 benchmark carries none of those fitted states. Consequently
 `normalization_method=None` is not evidence for raw compatibility, and the
-adapter rejects `identity_raw` with `input_contract_unverified`. Its step fit is
-available only for inputs explicitly marked
-`upstream_pre_edge_post_edge_normalized`; restoration returns those normalized
-absorption units and does not claim raw native-unit recovery.
+adapter validation fails unconditionally with `input_contract_unverified`.
+Neither a mutable method label nor a digest detached from a typed state proves
+that preprocessing occurred. The pure step transform remains available only for
+architecture and checkpoint probes in a known normalized numeric space; it does
+not authorize production inference or claim raw native-unit recovery.
 
 Checkpoint loading uses `torch.load(io.BytesIO(verified_bytes),
 map_location="cpu", weights_only=True)`. The same immutable bytes are hashed and
@@ -60,8 +61,9 @@ hyperspectrum run plan ... --tool-id xasdenoise --weight-file MODEL.pth --device
 # unavailable: input_contract_unverified
 ```
 
-When an evidenced normalized input contract becomes available, local CPU/GPU
-execution calls `hyperspectrum.adapters.xasdenoise:denoise_spectra`. OCI and
+When a structured, sample-bound normalization artifact becomes available,
+local CPU/GPU execution calls
+`hyperspectrum.adapters.xasdenoise:denoise_spectra`. OCI and
 Bohr must stage the same
 immutable benchmark, plan, source closure, and checkpoint and invoke that same
 entrypoint; no backend-specific scientific adapter is permitted. HyperSpectrum

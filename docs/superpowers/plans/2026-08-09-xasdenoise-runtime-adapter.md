@@ -8,7 +8,9 @@
 
 **Goal:** Add one provenance-complete HyperSpectrum adapter for the official XASDenoise nonuniform checkpoint that can execute unchanged in local Python, OCI, 5090, and Bohr container contexts.
 
-**Architecture:** Historical plan only. The implemented correction rejects raw input until an evidenced, reversible upstream normalization state is available.
+**Architecture:** Historical plan only. The implemented correction rejects every
+public input until a structured, sample-bound upstream normalization artifact is
+available. A mutable normalization label or detached digest is not evidence.
 
 **Tech Stack:** Python 3.10+, NumPy, SciPy, optional runtime-provided PyTorch, Pydantic v2, pytest, Ruff, mypy.
 

@@ -76,9 +76,11 @@ the `hyperspectrum-xasdenoise-step-baseline/v1` transform. The benchmark lacks
 the spectrum-specific E0, fit windows, fitted curves, and native-unit inverse.
 Even when `--weight-file MODEL.pth` matches the declared bytes, you must not plan
 or execute XASDenoise. Report the blocker and continue only with an available
-traditional baseline. If a future benchmark carries the evidenced normalization
-state, all backends must use the same
+traditional baseline. If a future benchmark carries a structured, sample-bound
+normalization artifact, all backends must use the same
 `hyperspectrum.adapters.xasdenoise:denoise_spectra` entrypoint.
+Until then that public entrypoint fails before checkpoint loading or inference;
+a mutable method label or a digest detached from a typed state is not evidence.
 
 ## Authorization Gate
 

@@ -12,13 +12,13 @@ import pytest
 from hyperspectrum.adapters import xasdenoise as adapter_module
 from hyperspectrum.adapters.xasdenoise import (
     XASDENOISE_CODE_LICENSE,
-    XASDENOISE_REQUIRED_NORMALIZATION,
+    XASDENOISE_REQUIRED_INPUT_ARTIFACT,
     XASDENOISE_SOURCE_COMMIT,
+    XASDENOISE_STEP_INPUT_SPACE,
     XASDENOISE_WEIGHT,
     VerifiedWeightAsset,
     WeightAssetContract,
     XASDenoiseAdapter,
-    XASDenoisePrediction,
     XASDenoiseRuntimeIdentity,
     _TorchRuntime,
     denoise_spectra,
@@ -29,7 +29,6 @@ from hyperspectrum.adapters.xasdenoise import (
 )
 from hyperspectrum.denoising import (
     CanonicalDenoisingInput,
-    CanonicalDenoisingOutput,
     SpectrumAxis,
     SpectrumSample,
     normalize,
@@ -347,6 +346,9 @@ def test_verify_entrypoint_reports_pinned_identity(
     report = json.loads(capsys.readouterr().out)
     assert report["source_commit"] == XASDENOISE_SOURCE_COMMIT
     assert report["code_license"] == "MIT"
+    assert report["required_input_artifact"] == XASDENOISE_REQUIRED_INPUT_ARTIFACT
+    assert report["raw_input_contract_status"] == "unverified"
+    assert "required_input_normalization" not in report
     assert report["weight"]["sha256"] == XASDENOISE_WEIGHT.sha256
 
 
@@ -372,7 +374,7 @@ def test_step_baseline_state_is_versioned_recorded_and_exactly_reversible() -> N
     assert state.edge_strategy == "maximum_first_derivative"
     assert state.inverse == "add_same_fitted_baseline"
     assert state.model_normalization_method is None
-    assert state.normalization_method == XASDENOISE_REQUIRED_NORMALIZATION
+    assert state.normalization_method == XASDENOISE_STEP_INPUT_SPACE
     assert state.native_output_semantics == (
         "model residual plus the exact fitted baseline in upstream-normalized absorption units"
     )
@@ -410,10 +412,10 @@ def canonical_input(*, increasing: bool = True) -> CanonicalDenoisingInput:
     return CanonicalDenoisingInput.from_normalized(normalize(sample, "identity_raw"))
 
 
-def test_adapter_capabilities_require_evidenced_upstream_normalization() -> None:
+def test_adapter_capabilities_require_structured_normalization_artifact() -> None:
     assert (
         XASDenoiseAdapter.capabilities.required_normalization
-        == XASDENOISE_REQUIRED_NORMALIZATION
+        == XASDENOISE_REQUIRED_INPUT_ARTIFACT
     )
     assert XASDenoiseAdapter.capabilities.native_unit_recovery is False
     assert (
@@ -443,87 +445,51 @@ def test_adapter_capabilities_require_evidenced_upstream_normalization() -> None
     )
 
 
-def test_scientific_gate_rejects_raw_but_accepts_explicit_normalized_contract() -> None:
-    # Break caught: model normalization_method=None was incorrectly interpreted as
-    # proof that raw ketek/i0 ratios were checkpoint-compatible.
+def test_scientific_gate_rejects_raw_relabel_without_structured_artifact() -> None:
+    # Break caught: replacing only a mutable method label leaves the identity_raw
+    # state digest untouched and cannot prove upstream preprocessing occurred.
     raw = canonical_input()
+    relabelled = replace(raw, normalization_method=XASDENOISE_STEP_INPUT_SPACE)
+    assert relabelled.normalization_state_digest == raw.normalization_state_digest
+
+    for candidate in (raw, relabelled):
+        with pytest.raises(ValueError, match="input_contract_unverified"):
+            XASDenoiseAdapter.validate_input(candidate)
+
+
+def test_adapter_input_contract_gate_precedes_shape_validation() -> None:
     with pytest.raises(ValueError, match="input_contract_unverified"):
-        XASDenoiseAdapter.validate_input(raw)
-
-    normalized = replace(
-        raw, normalization_method=XASDENOISE_REQUIRED_NORMALIZATION
-    )
-    XASDenoiseAdapter.validate_input(normalized)
-
-
-def test_adapter_input_contract_rejects_decreasing_energy_before_inference() -> None:
-    with pytest.raises(ValueError, match="strictly increasing"):
         XASDenoiseAdapter.validate_input(canonical_input(increasing=False))
 
 
-def test_batch_wrapper_marks_raw_input_and_preserves_order_for_injected_adapter(
-    tmp_path: Path,
+def test_production_batch_entrypoint_fails_before_adapter_or_inference(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # Break caught: a backend-specific wrapper could bypass canonical normalization
-    # or reorder samples while adapting arrays for the model.
-    seen: list[CanonicalDenoisingInput] = []
+    # Break caught: the public wrapper's private adapter hook could bypass the
+    # scientific gate and publish predictions for relabelled raw arrays.
+    constructed = False
+
+    def forbidden_adapter(*args: object, **kwargs: object) -> object:
+        nonlocal constructed
+        constructed = True
+        raise AssertionError("adapter construction and inference must remain unreachable")
+
+    monkeypatch.setattr(adapter_module, "XASDenoiseAdapter", forbidden_adapter)
     energy = np.linspace(5693.0, 5801.4, 135)
-    state_signal = 0.5 * (1.0 + np.tanh((energy - 5745.0) / 4.0))
-    _, _, state = preprocess_step_baseline(energy, state_signal)
-
-    class FakeAdapter:
-        device = "cpu"
-        runtime_identity = XASDenoiseRuntimeIdentity(
-            schema_version="hyperspectrum-xasdenoise-runtime/v1",
-            requested_device="auto",
-            resolved_device="cpu",
-            backend="cpu",
-            torch_version="test-torch",
-            cuda_version=None,
-            cudnn_version=None,
-            loaded_weight_sha256="a" * 64,
-        )
-
-        def predict(
-            self, model_input: CanonicalDenoisingInput
-        ) -> CanonicalDenoisingOutput:
-            seen.append(model_input)
-            return CanonicalDenoisingOutput(
-                sample_id=model_input.sample_id,
-                signal=model_input.signal + 0.25,
-                valid_mask=model_input.valid_mask,
-                normalization_state_digest=model_input.normalization_state_digest,
-            )
-
-        def preprocessing_state(self, sample_id: str) -> object:
-            assert sample_id in {"sample-a", "sample-b"}
-            return state
-
-    spectra = tuple(
+    spectra = (
         XASSpectrum(
-            sample_id=sample_id,
+            sample_id="sample-a",
             group_id="La08",
             energy=energy,
-            intensity=state_signal + index,
+            intensity=np.linspace(0.0, 1.0, len(energy)),
             energy_unit="eV",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="input_contract_unverified"):
+        denoise_spectra(
+            spectra,
+            weights_path=tmp_path / "must-not-be-read.pth",
         )
-        for index, sample_id in enumerate(("sample-a", "sample-b"))
-    )
 
-    results = denoise_spectra(
-        spectra,
-        weights_path=tmp_path / "not-read-by-injected-adapter.pth",
-        _adapter=FakeAdapter(),  # type: ignore[arg-type]
-    )
-
-    assert all(isinstance(result, XASDenoisePrediction) for result in results)
-    assert tuple(result.spectrum.sample_id for result in results) == (
-        "sample-a",
-        "sample-b",
-    )
-    assert all(item.normalization_method == "identity_raw" for item in seen)
-    np.testing.assert_allclose(
-        results[0].spectrum.intensity, spectra[0].intensity + 0.25
-    )
-    assert results[0].preprocessing_state is state
-    assert results[0].device == "cpu"
+    assert constructed is False

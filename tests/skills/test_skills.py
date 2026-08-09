@@ -92,6 +92,7 @@ def test_run_skill_enforces_dry_run_leakage_overwrite_and_authority_gates() -> N
         "--weight-file model.pth",
         "input_contract_unverified",
         "upstream pre/post-edge normalization",
+        "structured, sample-bound normalization artifact",
         "must not plan or execute xasdenoise",
         "hyperspectrum-xasdenoise-step-baseline/v1",
         "same `hyperspectrum.adapters.xasdenoise:denoise_spectra` entrypoint",

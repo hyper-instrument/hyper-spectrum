@@ -336,8 +336,8 @@ def plan_run(
     if tool.id == "xasdenoise":
         parameters = {
             "input_contract_status": "unverified",
-            "required_input_normalization": (
-                "upstream_pre_edge_post_edge_normalized"
+            "required_input_artifact": (
+                "structured_sample_bound_upstream_normalization_artifact"
             ),
             "model_normalization_method": None,
             "preprocessing": {
