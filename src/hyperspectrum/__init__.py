@@ -7,6 +7,7 @@ from .contracts import (
     ObservationBundle,
     PredictionBundle,
     PredictionBundleV2,
+    PredictionBundleV3,
     TaskSpec,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "ObservationBundle",
     "PredictionBundle",
     "PredictionBundleV2",
+    "PredictionBundleV3",
     "TaskSpec",
 ]

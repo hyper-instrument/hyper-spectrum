@@ -29,6 +29,10 @@ _IPV4_TOKEN = re.compile(r"(?<![a-z0-9_.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![a-z0-
 _IPV6_TOKEN = re.compile(
     r"\[?[0-9a-f:.]+(?:%[a-z0-9_.-]+)?\]?", re.IGNORECASE
 )
+_SCHEMA_RESOURCES = {
+    "hyperspectrum-xas-m0-selection/v1": "schemas/xas-m0-selection.schema.json",
+    "hyperspectrum-xas-m0-selection/v2": "schemas/xas-m0-selection-v2.schema.json",
+}
 
 
 class XasM0EvidenceError(ValueError):
@@ -55,7 +59,12 @@ def validate_xas_m0_evidence(value: object) -> dict[str, Any]:
             "schema_invalid", "XAS M0 evidence must be a JSON object"
         )
 
-    schema = _load_schema()
+    schema_version = detached.get("schema_version")
+    if not isinstance(schema_version, str) or schema_version not in _SCHEMA_RESOURCES:
+        raise XasM0EvidenceError(
+            "schema_invalid", "XAS M0 evidence uses an unsupported schema"
+        )
+    schema = _load_schema(schema_version)
     validator = Draft202012Validator(
         schema, format_checker=Draft202012Validator.FORMAT_CHECKER
     )
@@ -81,9 +90,9 @@ def validate_xas_m0_evidence(value: object) -> dict[str, Any]:
     return cast(dict[str, Any], detached)
 
 
-def _load_schema() -> dict[str, Any]:
+def _load_schema(schema_version: str) -> dict[str, Any]:
     resource = files("hyperspectrum.resources").joinpath(
-        "schemas/xas-m0-selection.schema.json"
+        _SCHEMA_RESOURCES[schema_version]
     )
     loaded = json.loads(resource.read_text(encoding="utf-8"))
     if not isinstance(loaded, dict):  # pragma: no cover - packaged invariant
@@ -162,19 +171,44 @@ def _validate_provenance_chain(evidence: dict[str, Any]) -> None:
         )
     asset = matching_assets[0]
     byte_provenance = cast(dict[str, Any], asset["byte_provenance"])
-    if len(
-        {
+    if evidence["schema_version"] == "hyperspectrum-xas-m0-selection/v1":
+        source_dataset_chain = {
             dataset["content_digest"],
             byte_provenance["source_dataset_digest"],
             provenance["dataset_digest"],
         }
-    ) != 1 or len(
-        {
+        source_content_chain: set[object] | None = None
+        asset_chain = {
             asset["sha256"],
             provenance["data_digest"],
             handoff["data_asset_sha256"],
         }
-    ) != 1:
+    else:
+        source_dataset_chain = {
+            dataset["source_dataset_digest"],
+            byte_provenance["source_dataset_digest"],
+            provenance["source_dataset_digest"],
+        }
+        source_content_chain = {
+            dataset["source_content_manifest_digest"],
+            byte_provenance["source_content_manifest_digest"],
+            provenance["source_content_manifest_digest"],
+        }
+        asset_chain = {
+            asset["sha256"],
+            provenance["benchmark_asset_digest"],
+            handoff["benchmark_asset_sha256"],
+        }
+    chains_match = len(source_dataset_chain) == 1 and len(asset_chain) == 1
+    if source_content_chain is not None:
+        chains_match = chains_match and len(source_content_chain) == 1
+        explicit_identities = {
+            next(iter(source_dataset_chain)),
+            next(iter(source_content_chain)),
+            next(iter(asset_chain)),
+        }
+        chains_match = chains_match and len(explicit_identities) == 3
+    if not chains_match:
         raise XasM0EvidenceError(
             "provenance_mismatch", "XAS M0 evidence provenance is inconsistent"
         )

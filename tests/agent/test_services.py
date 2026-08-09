@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from hyperspectrum import agent
+from hyperspectrum.execution.plan import canonical_digest
 from hyperspectrum.hyperdata import (
     HydAuthenticationError,
     HydClientNotFoundError,
@@ -58,6 +59,74 @@ def candidate() -> DatasetCandidate:
             ],
         },
     )
+
+
+def benchmark_manifest_payload(
+    *, dataset_code: str, dataset_version: str, declared_manifest_digest: str
+) -> dict[str, object]:
+    dataset_identity = {
+        "id": dataset_code,
+        "code": dataset_code,
+        "version": dataset_version,
+        "upstream_revision": None,
+        "declared_manifest_digest": declared_manifest_digest,
+    }
+    source_content_manifest = {
+        "schema_version": "hyperspectrum-source-content-manifest/v1",
+        "files": [{"path": "sample.dat", "actual_size": 1, "sha256": "b" * 64}],
+    }
+    return {
+        "schema_version": "hyperspectrum-xanes-benchmark/v1",
+        "dataset": dataset_identity,
+        "source_dataset_digest": canonical_digest(
+            {
+                "schema_version": "hyperspectrum-source-dataset-identity/v1",
+                **dataset_identity,
+            }
+        ),
+        "source_content_manifest_digest": canonical_digest(source_content_manifest),
+        "benchmark_asset_digest": "3" * 64,
+        "source_content_manifest": source_content_manifest,
+        "reference_grid": {
+            "source_path": "sample.dat",
+            "source_sha256": "b" * 64,
+            "point_count": 135,
+            "energy_unit": "eV",
+        },
+        "preprocessing": {
+            "schema_version": "hyperspectrum-xanes-preprocessing/v1",
+            "signal": "ketek/i0",
+            "interpolation": "linear",
+            "endpoint_behavior": "nearest_measured_value_for_reference_endpoint_jitter",
+            "smoothing": "none",
+            "normalization": "none",
+        },
+        "noise": {
+            "schema_version": "hyperspectrum-xanes-binomial-thinning/v1",
+            "algorithm": "Binomial(round(count), dose_fraction) / dose_fraction",
+            "dose_fraction": 0.25,
+            "global_seed": 0,
+            "channels": ["i0", "ketek"],
+        },
+        "target": {
+            "semantics": "pseudo-clean frozen measurement",
+            "is_physical_noiseless_ground_truth": False,
+        },
+        "split": {
+            "schema_version": "hyperspectrum-split-manifest/v1",
+            "digest": "d" * 64,
+            "group_key": "composition",
+            "policy_version": "xanes-zenodo-10606662-fixed/v1",
+        },
+        "counts": {
+            "source_file_count": 1,
+            "spectrum_candidate_count": 1,
+            "admitted_spectrum_count": 1,
+            "rejected_spectrum_count": 0,
+            "excluded_file_count": 0,
+            "sidecar_file_count": 0,
+        },
+    }
 
 
 def test_doctor_can_be_ready_without_reading_credentials(
@@ -198,6 +267,73 @@ def test_discovery_maps_each_gateway_failure_category(
         assert captured.value.result == {"complete": False, "candidates": []}
 
 
+def test_materialize_xanes_service_uses_public_adapter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    declaration = tmp_path / "source-declaration.json"
+    declaration.write_text("{}", encoding="utf-8")
+    output = tmp_path / "bundle"
+    observed: dict[str, object] = {}
+
+    class Result:
+        def to_dict(self) -> dict[str, object]:
+            return {
+                "schema_version": "hyperspectrum-xanes-materialization-result/v1",
+                "source_dataset_digest": "a" * 64,
+                "source_content_manifest_digest": "b" * 64,
+                "benchmark_asset_digest": "c" * 64,
+            }
+
+    def fake_materialize(**kwargs: object) -> Result:
+        observed.update(kwargs)
+        return Result()
+
+    monkeypatch.setattr(agent, "materialize_xanes_spec", fake_materialize)
+
+    response = agent.materialize_xanes(
+        source_root=source_root,
+        source_declaration_file=declaration,
+        output_directory=output,
+        dose_fraction=0.5,
+        global_seed=17,
+    )
+
+    assert response.result == {
+        "schema_version": "hyperspectrum-xanes-materialization-result/v1",
+        "source_dataset_digest": "a" * 64,
+        "source_content_manifest_digest": "b" * 64,
+        "benchmark_asset_digest": "c" * 64,
+    }
+    assert observed == {
+        "source_root": source_root,
+        "source_declaration_file": declaration,
+        "output_directory": output,
+        "dose_fraction": 0.5,
+        "global_seed": 17,
+    }
+
+
+def test_materialize_xanes_service_maps_invalid_source_to_request_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def reject(**kwargs: object) -> None:
+        _ = kwargs
+        raise agent.SourceIntegrityError("source file SHA-256 mismatch")
+
+    monkeypatch.setattr(agent, "materialize_xanes_spec", reject)
+
+    with pytest.raises(agent.AgentRequestError, match="SHA-256 mismatch"):
+        agent.materialize_xanes(
+            source_root=tmp_path / "source",
+            source_declaration_file=tmp_path / "declaration.json",
+            output_directory=tmp_path / "bundle",
+            dose_fraction=0.25,
+            global_seed=0,
+        )
+
+
 def test_recommendation_reads_one_declared_candidate_file(tmp_path: Path) -> None:
     source = tmp_path / "candidate.json"
     source.write_text(candidate().model_dump_json(), encoding="utf-8")
@@ -290,6 +426,7 @@ def test_plan_service_uses_public_planner_and_returns_serializable_plan(
     task_file = tmp_path / "task.json"
     candidate_file = tmp_path / "candidate.json"
     verdict_file = tmp_path / "verdict.json"
+    benchmark_manifest_file = tmp_path / "benchmark-manifest.json"
     task_file.write_text(
         json.dumps(
             {
@@ -329,6 +466,16 @@ def test_plan_service_uses_public_planner_and_returns_serializable_plan(
         ),
         encoding="utf-8",
     )
+    benchmark_manifest_file.write_text(
+        json.dumps(
+            benchmark_manifest_payload(
+                dataset_code="XAS-1",
+                dataset_version="v1",
+                declared_manifest_digest="a" * 64,
+            )
+        ),
+        encoding="utf-8",
+    )
     observed: dict[str, object] = {}
 
     class Planned:
@@ -336,7 +483,7 @@ def test_plan_service_uses_public_planner_and_returns_serializable_plan(
 
         def model_dump(self, *, mode: str) -> dict[str, object]:
             assert mode == "json"
-            return {"schema_version": "hyperspectrum-run-plan/v2", "dry_run": True}
+            return {"schema_version": "hyperspectrum-run-plan/v3", "dry_run": True}
 
     def fake_build(**kwargs: object) -> Planned:
         observed.update(kwargs)
@@ -348,6 +495,7 @@ def test_plan_service_uses_public_planner_and_returns_serializable_plan(
         task_file=task_file,
         candidate_file=candidate_file,
         verdict_file=verdict_file,
+        benchmark_manifest_file=benchmark_manifest_file,
         tool_id="savgol",
         output_directory=tmp_path / "run",
         max_samples=8,
@@ -356,13 +504,14 @@ def test_plan_service_uses_public_planner_and_returns_serializable_plan(
     )
 
     assert response.result == {
-        "plan": {"schema_version": "hyperspectrum-run-plan/v2", "dry_run": True},
+        "plan": {"schema_version": "hyperspectrum-run-plan/v3", "dry_run": True},
         "plan_digest": "f" * 64,
     }
     assert observed["dry_run"] is True
     assert observed["selected_sample_ids"] == ("sample-1", "sample-2")
     assert observed["data_origin"] == "real"
     assert observed["parameters"] == {"window_length": 5, "polyorder": 2}
+    assert observed["benchmark_asset"].benchmark_asset_digest == "3" * 64  # type: ignore[attr-defined]
 
 
 def test_local_service_uses_public_executor(

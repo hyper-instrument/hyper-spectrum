@@ -10,7 +10,8 @@ from pathlib import Path
 import pytest
 
 from hyperspectrum.contracts import MetricSpec, TaskSpec
-from hyperspectrum.execution.plan import RunPlan, build_run_plan
+from hyperspectrum.datasets import BenchmarkAssetIdentity
+from hyperspectrum.execution.plan import RunPlanV3, build_run_plan, parse_run_plan
 from hyperspectrum.hyperdata.models import DatasetCandidate
 from hyperspectrum.registry.loader import load_tool_manifest
 from hyperspectrum.registry.models import ResourceBudget, ToolAvailability, ToolManifest
@@ -20,6 +21,9 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_DIGEST = sha256(
     (ROOT / "tests/fixtures/xas/denoising-pairs.npz").read_bytes()
 ).hexdigest()
+CATALOG_DIGEST = "9" * 64
+SOURCE_DATASET_DIGEST = "1" * 64
+SOURCE_CONTENT_MANIFEST_DIGEST = "2" * 64
 
 
 def task() -> TaskSpec:
@@ -46,7 +50,7 @@ def task() -> TaskSpec:
 def dataset(
     *,
     dataset_version: str | None = "fixture-v1",
-    content_digest: str | None = FIXTURE_DIGEST,
+    content_digest: str | None = CATALOG_DIGEST,
 ) -> DatasetCandidate:
     return DatasetCandidate(
         dataset_code="synthetic-xas-denoising-fixture",
@@ -67,7 +71,7 @@ def verdict(*, status: str = "scoreable") -> ReadinessVerdict:
         return ReadinessVerdict(
             dataset_code="synthetic-xas-denoising-fixture",
             dataset_version="fixture-v1",
-            content_digest=FIXTURE_DIGEST,
+            content_digest=CATALOG_DIGEST,
             status=status,  # type: ignore[arg-type]
             reasons=("test_non_scoreable",),
             candidate_tasks=(),
@@ -75,7 +79,7 @@ def verdict(*, status: str = "scoreable") -> ReadinessVerdict:
     return ReadinessVerdict(
         dataset_code="synthetic-xas-denoising-fixture",
         dataset_version="fixture-v1",
-        content_digest=FIXTURE_DIGEST,
+        content_digest=CATALOG_DIGEST,
         status="scoreable",
         reasons=("xas_verified_noisy_clean_pair",),
         candidate_tasks=("denoising",),
@@ -94,11 +98,25 @@ def resources(**changes: object) -> ResourceBudget:
     return ResourceBudget.model_validate(values)
 
 
-def plan(tmp_path: Path, **changes: object) -> RunPlan:
+def benchmark_asset(
+    *, benchmark_asset_digest: str = FIXTURE_DIGEST
+) -> BenchmarkAssetIdentity:
+    return BenchmarkAssetIdentity(
+        dataset_code="synthetic-xas-denoising-fixture",
+        dataset_version="fixture-v1",
+        declared_manifest_digest=CATALOG_DIGEST,
+        source_dataset_digest=SOURCE_DATASET_DIGEST,
+        source_content_manifest_digest=SOURCE_CONTENT_MANIFEST_DIGEST,
+        benchmark_asset_digest=benchmark_asset_digest,
+    )
+
+
+def plan(tmp_path: Path, **changes: object) -> RunPlanV3:
     values: dict[str, object] = {
         "task": task(),
         "dataset": dataset(),
         "verdict": verdict(),
+        "benchmark_asset": benchmark_asset(),
         "tool": savgol(),
         "availability": ToolAvailability(available=True),
         "backend": "local",
@@ -111,6 +129,17 @@ def plan(tmp_path: Path, **changes: object) -> RunPlan:
         "data_origin": "synthetic-test",
     }
     values.update(changes)
+    selected_dataset = values["dataset"]
+    if "benchmark_asset" not in changes and isinstance(
+        selected_dataset, DatasetCandidate
+    ):
+        test_asset_digest = selected_dataset.evidence.get(
+            "test_benchmark_asset_digest"
+        )
+        if isinstance(test_asset_digest, str):
+            values["benchmark_asset"] = benchmark_asset(
+                benchmark_asset_digest=test_asset_digest
+            )
     return build_run_plan(**values)  # type: ignore[arg-type]
 
 
@@ -123,11 +152,21 @@ def test_plan_preserves_every_reproducibility_input_and_detaches_parameters(
     result = plan(tmp_path, parameters=parameters)
     parameters["nested"]["mode"] = "mirror"  # type: ignore[index]
 
-    assert result.schema_version == "hyperspectrum-run-plan/v2"
+    assert result.schema_version == "hyperspectrum-run-plan/v3"
     assert result.task == task()
     assert result.dataset_code == "synthetic-xas-denoising-fixture"
     assert result.dataset_version == "fixture-v1"
-    assert result.data_digest == FIXTURE_DIGEST
+    assert result.source_dataset_digest == SOURCE_DATASET_DIGEST
+    assert result.source_content_manifest_digest == SOURCE_CONTENT_MANIFEST_DIGEST
+    assert result.benchmark_asset_digest == FIXTURE_DIGEST
+    assert len(
+        {
+            result.source_dataset_digest,
+            result.source_content_manifest_digest,
+            result.benchmark_asset_digest,
+            dataset().content_digest,
+        }
+    ) == 4
     assert result.tool_digest == savgol().tool_digest
     assert len(result.implementation_digest) == 64
     assert result.weight_digest == "none"
@@ -164,6 +203,54 @@ def test_plan_digest_binds_the_exact_ordered_sample_selection(tmp_path: Path) ->
 
     assert first.plan_digest != different_member.plan_digest
     assert first.plan_digest != different_order.plan_digest
+
+
+def test_v2_plan_remains_parseable_for_legacy_execution(tmp_path: Path) -> None:
+    current = plan(tmp_path)
+    raw = current.model_dump(mode="json")
+    raw["schema_version"] = "hyperspectrum-run-plan/v2"
+    raw["data_digest"] = raw.pop("benchmark_asset_digest")
+    del raw["source_dataset_digest"]
+    del raw["source_content_manifest_digest"]
+
+    legacy = parse_run_plan(raw)
+
+    assert legacy.schema_version == "hyperspectrum-run-plan/v2"
+    assert legacy.data_digest == FIXTURE_DIGEST
+
+
+@pytest.mark.parametrize("field", ["dataset_code", "dataset_version"])
+def test_planning_rejects_benchmark_for_different_dataset_identity(
+    tmp_path: Path, field: str
+) -> None:
+    values = {
+        "dataset_code": "synthetic-xas-denoising-fixture",
+        "dataset_version": "fixture-v1",
+        "declared_manifest_digest": CATALOG_DIGEST,
+        "source_dataset_digest": SOURCE_DATASET_DIGEST,
+        "source_content_manifest_digest": SOURCE_CONTENT_MANIFEST_DIGEST,
+        "benchmark_asset_digest": FIXTURE_DIGEST,
+    }
+    values[field] = "different"
+
+    with pytest.raises(ValueError, match="benchmark asset dataset identity"):
+        plan(tmp_path, benchmark_asset=BenchmarkAssetIdentity(**values))
+
+
+def test_planning_binds_catalog_content_to_the_declared_source_manifest(
+    tmp_path: Path,
+) -> None:
+    mismatched = BenchmarkAssetIdentity(
+        dataset_code="synthetic-xas-denoising-fixture",
+        dataset_version="fixture-v1",
+        declared_manifest_digest="f" * 64,
+        source_dataset_digest=SOURCE_DATASET_DIGEST,
+        source_content_manifest_digest=SOURCE_CONTENT_MANIFEST_DIGEST,
+        benchmark_asset_digest=FIXTURE_DIGEST,
+    )
+
+    with pytest.raises(ValueError, match="declared manifest digest"):
+        plan(tmp_path, benchmark_asset=mismatched)
 
 
 @pytest.mark.parametrize(

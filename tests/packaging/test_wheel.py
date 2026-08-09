@@ -8,11 +8,92 @@ import subprocess
 import sys
 import sysconfig
 import zipfile
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def canonical_digest(value: object) -> str:
+    return sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def benchmark_manifest_payload(
+    *, dataset_code: str, dataset_version: str, declared_manifest_digest: str
+) -> dict[str, object]:
+    dataset_identity = {
+        "id": dataset_code,
+        "code": dataset_code,
+        "version": dataset_version,
+        "upstream_revision": None,
+        "declared_manifest_digest": declared_manifest_digest,
+    }
+    source_content_manifest = {
+        "schema_version": "hyperspectrum-source-content-manifest/v1",
+        "files": [{"path": "sample.dat", "actual_size": 1, "sha256": "b" * 64}],
+    }
+    return {
+        "schema_version": "hyperspectrum-xanes-benchmark/v1",
+        "dataset": dataset_identity,
+        "source_dataset_digest": canonical_digest(
+            {
+                "schema_version": "hyperspectrum-source-dataset-identity/v1",
+                **dataset_identity,
+            }
+        ),
+        "source_content_manifest_digest": canonical_digest(source_content_manifest),
+        "benchmark_asset_digest": "3" * 64,
+        "source_content_manifest": source_content_manifest,
+        "reference_grid": {
+            "source_path": "sample.dat",
+            "source_sha256": "b" * 64,
+            "point_count": 135,
+            "energy_unit": "eV",
+        },
+        "preprocessing": {
+            "schema_version": "hyperspectrum-xanes-preprocessing/v1",
+            "signal": "ketek/i0",
+            "interpolation": "linear",
+            "endpoint_behavior": "nearest_measured_value_for_reference_endpoint_jitter",
+            "smoothing": "none",
+            "normalization": "none",
+        },
+        "noise": {
+            "schema_version": "hyperspectrum-xanes-binomial-thinning/v1",
+            "algorithm": "Binomial(round(count), dose_fraction) / dose_fraction",
+            "dose_fraction": 0.25,
+            "global_seed": 0,
+            "channels": ["i0", "ketek"],
+        },
+        "target": {
+            "semantics": "pseudo-clean frozen measurement",
+            "is_physical_noiseless_ground_truth": False,
+        },
+        "split": {
+            "schema_version": "hyperspectrum-split-manifest/v1",
+            "digest": "d" * 64,
+            "group_key": "composition",
+            "policy_version": "xanes-zenodo-10606662-fixed/v1",
+        },
+        "counts": {
+            "source_file_count": 1,
+            "spectrum_candidate_count": 1,
+            "admitted_spectrum_count": 1,
+            "rejected_spectrum_count": 0,
+            "excluded_file_count": 0,
+            "sidecar_file_count": 0,
+        },
+    }
 
 
 def command(
@@ -52,6 +133,7 @@ def installed_console(
         names = set(archive.namelist())
     assert "hyperspectrum/resources/schemas/hyperspectrum-tool-v1.schema.json" in names
     assert "hyperspectrum/resources/schemas/xas-m0-selection.schema.json" in names
+    assert "hyperspectrum/resources/schemas/xas-m0-selection-v2.schema.json" in names
     assert "hyperspectrum/resources/tools/xas/savgol/tool.yaml" in names
     assert "hyperspectrum/resources/tools/xas/xasdenoise/tool.yaml" in names
 
@@ -135,10 +217,11 @@ def assert_error_envelope(
     return envelope
 
 
-def write_plan_contracts(root: Path) -> tuple[Path, Path, Path]:
+def write_plan_contracts(root: Path) -> tuple[Path, Path, Path, Path]:
     candidate = root / "candidate.json"
     task = root / "task.json"
     verdict = root / "verdict.json"
+    benchmark_manifest = root / "benchmark-manifest.json"
     digest = "a" * 64
     candidate.write_text(
         json.dumps(
@@ -188,7 +271,17 @@ def write_plan_contracts(root: Path) -> tuple[Path, Path, Path]:
         ),
         encoding="utf-8",
     )
-    return task, candidate, verdict
+    benchmark_manifest.write_text(
+        json.dumps(
+            benchmark_manifest_payload(
+                dataset_code="XAS-WHEEL",
+                dataset_version="v1",
+                declared_manifest_digest=digest,
+            )
+        ),
+        encoding="utf-8",
+    )
+    return task, candidate, verdict, benchmark_manifest
 
 
 def plan_command(
@@ -197,6 +290,7 @@ def plan_command(
     task: Path,
     candidate: Path,
     verdict: Path,
+    benchmark_manifest: Path,
     tool_id: str,
 ) -> tuple[str, ...]:
     return (
@@ -209,6 +303,8 @@ def plan_command(
         str(candidate),
         "--verdict-file",
         str(verdict),
+        "--benchmark-manifest-file",
+        str(benchmark_manifest),
         "--tool-id",
         tool_id,
         "--output-directory",
@@ -232,6 +328,10 @@ def test_root_and_packaged_resources_have_exact_byte_parity() -> None:
         (
             ROOT / "docs/evidence/xas-m0-selection.schema.json",
             resources.joinpath("schemas/xas-m0-selection.schema.json"),
+        ),
+        (
+            ROOT / "docs/evidence/xas-m0-selection-v2.schema.json",
+            resources.joinpath("schemas/xas-m0-selection-v2.schema.json"),
         ),
         (
             ROOT / "tools/xas/savgol/tool.yaml",
@@ -267,9 +367,11 @@ def test_fresh_wheel_console_help_doctor_match_and_plan(
     )
     assert matched["result"]["matches"][0]["id"] == "savgol"  # type: ignore[index]
 
-    task, candidate, verdict = write_plan_contracts(root)
+    task, candidate, verdict, benchmark_manifest = write_plan_contracts(root)
     planned = command(
-        *plan_command(console, root, task, candidate, verdict, "savgol"),
+        *plan_command(
+            console, root, task, candidate, verdict, benchmark_manifest, "savgol"
+        ),
         env=environment,
     )
     envelope = assert_success_envelope(planned)
@@ -319,9 +421,11 @@ def test_installed_console_exit_categories_and_secret_probes(
         4,
         "missing_asset_or_tool",
     )
-    task, candidate, verdict = write_plan_contracts(root)
+    task, candidate, verdict, benchmark_manifest = write_plan_contracts(root)
     constrained = (
-        *plan_command(console, root, task, candidate, verdict, "savgol")[:-1],
+        *plan_command(
+            console, root, task, candidate, verdict, benchmark_manifest, "savgol"
+        )[:-1],
         "--max-samples",
         "0",
         "--json",
@@ -332,7 +436,9 @@ def test_installed_console_exit_categories_and_secret_probes(
         "invalid_or_not_ready",
     )
     secret_constrained = (
-        *plan_command(console, root, task, candidate, verdict, "savgol")[:-1],
+        *plan_command(
+            console, root, task, candidate, verdict, benchmark_manifest, "savgol"
+        )[:-1],
         "--max-samples",
         "api_key=INSTALLED_PARSE_SECRET",
         "--json",
@@ -342,7 +448,15 @@ def test_installed_console_exit_categories_and_secret_probes(
     assert "INSTALLED_PARSE_SECRET" not in secret_parse.stdout + secret_parse.stderr
     assert_error_envelope(
         command(
-            *plan_command(console, root, task, candidate, verdict, "unknown-tool"),
+            *plan_command(
+                console,
+                root,
+                task,
+                candidate,
+                verdict,
+                benchmark_manifest,
+                "unknown-tool",
+            ),
             env=environment,
         ),
         4,
@@ -350,7 +464,15 @@ def test_installed_console_exit_categories_and_secret_probes(
     )
     assert_error_envelope(
         command(
-            *plan_command(console, root, task, candidate, verdict, "xasdenoise"),
+            *plan_command(
+                console,
+                root,
+                task,
+                candidate,
+                verdict,
+                benchmark_manifest,
+                "xasdenoise",
+            ),
             env=environment,
         ),
         4,
@@ -358,7 +480,15 @@ def test_installed_console_exit_categories_and_secret_probes(
     )
     dry_plan = assert_success_envelope(
         command(
-            *plan_command(console, root, task, candidate, verdict, "savgol"),
+            *plan_command(
+                console,
+                root,
+                task,
+                candidate,
+                verdict,
+                benchmark_manifest,
+                "savgol",
+            ),
             env=environment,
         )
     )["result"]["plan"]  # type: ignore[index]

@@ -56,23 +56,29 @@ The first XAS story uses these commands:
 .venv/bin/hyperspectrum data discover --modality xas --profile volcano --json
 .venv/bin/hyperspectrum task recommend --candidate-file CANDIDATE.json --json
 .venv/bin/hyperspectrum tools match --task xas-denoising --json
-.venv/bin/hyperspectrum run plan --task-file TASK.json --candidate-file CANDIDATE.json --verdict-file VERDICT.json --tool-id savgol --output-directory RUN_DIR --sample-id SAMPLE_ID --max-samples 8 --dry-run --json
-.venv/bin/hyperspectrum run local --plan-file PLAN.json --source-npz NOISY_INPUT.npz --sample-id SAMPLE_ID --json
+.venv/bin/hyperspectrum data materialize-xanes-spec --source-root SOURCE_DIR --source-declaration-file SOURCE_DECLARATION.json --output-directory BENCHMARK_DIR --dose-fraction 0.25 --global-seed 0 --json
+.venv/bin/hyperspectrum run plan --task-file TASK.json --candidate-file CANDIDATE.json --verdict-file VERDICT.json --benchmark-manifest-file BENCHMARK_DIR/manifest.json --tool-id savgol --output-directory RUN_DIR --sample-id SAMPLE_ID --max-samples 8 --dry-run --json
+.venv/bin/hyperspectrum run local --plan-file PLAN.json --source-npz BENCHMARK_DIR/benchmark.npz --sample-id SAMPLE_ID --json
 .venv/bin/hyperspectrum evidence validate --evidence-file XAS_M0_SELECTION.json --json
 ```
 
 ## Wire compatibility
 
-- New planning emits `hyperspectrum-run-plan/v2`. Every v2 plan binds an exact,
-  ordered sample selection; unbound v1 plan files are refused with instructions
-  to create a new plan using repeated `--sample-id` options. There is no implicit
-  v1 migration because reconstructing a missing selection would change run
-  identity.
+- New planning emits `hyperspectrum-run-plan/v3`. Every v3 plan binds an exact,
+  ordered sample selection plus separate source-dataset, verified-content, and
+  derived-asset SHA-256 identities. Planning validates the complete benchmark
+  manifest, recomputes both source chains, and binds the declared manifest to
+  the catalog digest. V3 execution accepts only the canonical 16-key benchmark
+  NPZ. Unbound v1 plan files are refused; v2 plans
+  remain readable/executable for existing artifacts only. There is no implicit
+  migration because reconstructing missing selection or digest semantics would
+  change run identity.
 - `hyperspectrum-prediction/v1` remains available for existing constructors and
   keeps its original non-empty provenance contract. It cannot satisfy the XAS
-  M0 success handoff. The local writer emits `hyperspectrum-prediction/v2`, which
-  requires formatted execution digests, non-blank dataset identity, and a v2
-  selection-bound plan identity.
+  M0 v2 success handoff. New local writes emit `hyperspectrum-prediction/v3`,
+  which requires the three explicit data identity classes, formatted execution
+  digests, non-blank dataset identity, and a v3 selection-bound plan identity.
+  Prediction v2 remains paired with legacy plan v2 execution.
 - Successful M0 evidence must pass `evidence validate`. The packaged semantic
   validator runs JSON Schema first, then structural redaction, locator policy,
   provenance equality, asset mapping, and count-order checks.

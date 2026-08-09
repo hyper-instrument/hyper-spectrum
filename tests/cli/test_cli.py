@@ -114,6 +114,64 @@ def test_data_discover_forwards_modality_and_profile(
     assert calls == [("xas", "volcano")]
 
 
+def test_data_materialize_xanes_spec_forwards_only_declared_inputs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source_root = tmp_path / "source"
+    source_declaration = tmp_path / "source-declaration.json"
+    output_directory = tmp_path / "bundle"
+    calls: list[dict[str, object]] = []
+
+    def fake_materialize(**kwargs: object) -> ServiceResponse:
+        calls.append(kwargs)
+        return payload(
+            {
+                "schema_version": "hyperspectrum-xanes-materialization-result/v1",
+                "benchmark_asset_digest": "c" * 64,
+            }
+        )
+
+    monkeypatch.setattr(cli.services, "materialize_xanes", fake_materialize)
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "data",
+            "materialize-xanes-spec",
+            "--source-root",
+            str(source_root),
+            "--source-declaration-file",
+            str(source_declaration),
+            "--output-directory",
+            str(output_directory),
+            "--dose-fraction",
+            "0.1",
+            "--global-seed",
+            "42",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert_envelope(
+        result,
+        ok=True,
+        expected_result={
+            "schema_version": "hyperspectrum-xanes-materialization-result/v1",
+            "benchmark_asset_digest": "c" * 64,
+        },
+    )
+    assert calls == [
+        {
+            "source_root": source_root,
+            "source_declaration_file": source_declaration,
+            "output_directory": output_directory,
+            "dose_fraction": 0.1,
+            "global_seed": 42,
+        }
+    ]
+
+
 def test_task_recommend_forwards_candidate_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -163,6 +221,7 @@ def test_run_plan_forwards_only_declared_inputs(
     task = tmp_path / "task.json"
     candidate = tmp_path / "candidate.json"
     verdict = tmp_path / "verdict.json"
+    benchmark_manifest = tmp_path / "benchmark-manifest.json"
     output = tmp_path / "run"
     calls: list[dict[str, object]] = []
 
@@ -183,6 +242,8 @@ def test_run_plan_forwards_only_declared_inputs(
             str(candidate),
             "--verdict-file",
             str(verdict),
+            "--benchmark-manifest-file",
+            str(benchmark_manifest),
             "--tool-id",
             "savgol",
             "--output-directory",
@@ -209,6 +270,7 @@ def test_run_plan_forwards_only_declared_inputs(
             "task_file": task,
             "candidate_file": candidate,
             "verdict_file": verdict,
+            "benchmark_manifest_file": benchmark_manifest,
             "tool_id": "savgol",
             "output_directory": output,
             "max_samples": 8,

@@ -14,8 +14,18 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from hyperspectrum.contracts import TaskSpec
+from hyperspectrum.datasets.xanes_spec import (
+    SourceIntegrityError,
+    load_benchmark_asset_identity,
+    materialize_xanes_spec,
+)
 from hyperspectrum.evidence import XasM0EvidenceError, validate_xas_m0_evidence
-from hyperspectrum.execution import RunPlan, build_run_plan, execute_local_run
+from hyperspectrum.execution import (
+    RunPlanType,
+    build_run_plan,
+    execute_local_run,
+    parse_run_plan,
+)
 from hyperspectrum.hyperdata import (
     HydAuthenticationError,
     HydClientNotFoundError,
@@ -187,6 +197,33 @@ def discover_data(modality: str, profile: str) -> ServiceResponse:
     )
 
 
+def materialize_xanes(
+    *,
+    source_root: Path,
+    source_declaration_file: Path,
+    output_directory: Path,
+    dose_fraction: float,
+    global_seed: int,
+) -> ServiceResponse:
+    """Materialize a declared XANES SPEC tree into one canonical bundle."""
+
+    try:
+        result = materialize_xanes_spec(
+            source_root=source_root,
+            source_declaration_file=source_declaration_file,
+            output_directory=output_directory,
+            dose_fraction=dose_fraction,
+            global_seed=global_seed,
+        )
+    except FileExistsError as error:
+        raise AgentRequestError(str(error)) from error
+    except (SourceIntegrityError, TypeError, ValueError, ValidationError) as error:
+        raise AgentRequestError(str(error)) from error
+    except OSError as error:
+        raise AgentExecutionError(str(error)) from error
+    return ServiceResponse(result=result.to_dict())
+
+
 def recommend_task(candidate_file: Path) -> ServiceResponse:
     """Recommend scoreability from one explicit candidate evidence artifact."""
 
@@ -262,6 +299,7 @@ def plan_run(
     task_file: Path,
     candidate_file: Path,
     verdict_file: Path,
+    benchmark_manifest_file: Path,
     tool_id: str,
     output_directory: Path,
     max_samples: int,
@@ -273,6 +311,14 @@ def plan_run(
     task = _read_model(task_file, TaskSpec, "task file")
     candidate = _read_model(candidate_file, DatasetCandidate, "candidate file")
     verdict = _read_model(verdict_file, ReadinessVerdict, "verdict file")
+    if not benchmark_manifest_file.is_file():
+        raise AgentMissingAssetError(
+            f"benchmark manifest file does not exist: {benchmark_manifest_file}"
+        )
+    try:
+        benchmark_asset = load_benchmark_asset_identity(benchmark_manifest_file)
+    except (OSError, TypeError, ValueError) as error:
+        raise AgentRequestError(f"benchmark manifest violates its contract: {error}") from error
     tool = _load_tool(tool_id)
     registry = ToolRegistry((tool,))
     availability = registry.availability(tool)
@@ -284,6 +330,7 @@ def plan_run(
             task=task,
             dataset=candidate,
             verdict=verdict,
+            benchmark_asset=benchmark_asset,
             tool=tool,
             availability=availability,
             backend="local",
@@ -349,8 +396,8 @@ def _read_model(path: Path, model: type[BaseModel], label: str) -> Any:
         raise AgentMissingAssetError(f"cannot read {label}: {error}") from error
 
 
-def _read_run_plan(path: Path) -> RunPlan:
-    """Read v2 plans and refuse unbound v1 files with actionable migration text."""
+def _read_run_plan(path: Path) -> RunPlanType:
+    """Read v2/v3 plans and refuse unbound v1 files with migration text."""
 
     if not path.is_file():
         raise AgentMissingAssetError(f"plan file does not exist: {path}")
@@ -365,10 +412,11 @@ def _read_run_plan(path: Path) -> RunPlan:
     ):
         raise AgentRequestError(
             "hyperspectrum-run-plan/v1 lacks a bound sample selection; "
-            "create a new v2 plan with repeated --sample-id options"
+            "create a new v3 plan with --benchmark-manifest-file and repeated "
+            "--sample-id options"
         )
     try:
-        return RunPlan.model_validate(raw)
+        return parse_run_plan(raw)
     except ValidationError as error:
         details = error.errors(include_input=False, include_url=False)
         serialized_details = json.dumps(
@@ -377,10 +425,12 @@ def _read_run_plan(path: Path) -> RunPlan:
             default=lambda value: redact_text(str(value)),
         )
         raise AgentRequestError(
-            f"plan file violates its v2 contract: {serialized_details}"
+            f"plan file violates its v2/v3 contract: {serialized_details}"
         ) from error
     except (TypeError, ValueError) as error:
-        raise AgentRequestError(f"plan file violates its v2 contract: {error}") from error
+        raise AgentRequestError(
+            f"plan file violates its v2/v3 contract: {error}"
+        ) from error
 
 
 def _load_tool(tool_id: str) -> ToolManifest:

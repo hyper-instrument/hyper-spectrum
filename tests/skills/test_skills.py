@@ -67,6 +67,8 @@ def test_run_skill_enforces_dry_run_leakage_overwrite_and_authority_gates() -> N
         "task recommend --candidate-file",
         "tools match --task xas-denoising --json",
         "run plan",
+        "--benchmark-manifest-file",
+        "three separate sha-256 classes",
         "bind every predeclared sample id during planning",
         "--dry-run",
         "does not exist",
@@ -80,7 +82,10 @@ def test_run_skill_enforces_dry_run_leakage_overwrite_and_authority_gates() -> N
         "publication",
         "hyperspectrum run local",
         "exactly `energy`, `noisy`, `sample_ids`, `group_ids`, and `energy_unit`",
-        "reject every extra member",
+        "canonical xanes benchmark npz",
+        "pseudo-clean frozen measurement",
+        "never physical noiseless ground truth",
+        "reject every unrecognized extra member",
         "ace owns formal",
     ):
         assert required in text

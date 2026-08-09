@@ -10,14 +10,21 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from hyperspectrum.contracts import PredictionBundleV2
+from hyperspectrum.contracts import PredictionBundleV2, PredictionBundleV3
 from hyperspectrum.execution import local
 from hyperspectrum.execution.local import execute_local_run
-from hyperspectrum.execution.plan import RunPlan
+from hyperspectrum.execution.plan import RunPlanV2, RunPlanV3
 from hyperspectrum.hyperdata.models import DatasetCandidate
 from hyperspectrum.tasks.recommend import ReadinessVerdict
 
-from .test_plan import dataset, plan, savgol, verdict
+from .test_plan import (
+    SOURCE_CONTENT_MANIFEST_DIGEST,
+    SOURCE_DATASET_DIGEST,
+    dataset,
+    plan,
+    savgol,
+    verdict,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "tests/fixtures/xas/denoising-pairs.npz"
@@ -30,13 +37,18 @@ def fixture_ids(limit: int = 3) -> tuple[str, ...]:
 
 
 def dataset_for_source(path: Path) -> DatasetCandidate:
-    return dataset(content_digest=sha256(path.read_bytes()).hexdigest())
+    return dataset().model_copy(
+        update={
+            "evidence": {
+                "test_benchmark_asset_digest": sha256(path.read_bytes()).hexdigest()
+            }
+        }
+    )
 
 
 def verdict_for_source(path: Path) -> ReadinessVerdict:
-    return verdict().model_copy(
-        update={"content_digest": sha256(path.read_bytes()).hexdigest()}
-    )
+    _ = path
+    return verdict()
 
 
 def noisy_source(path: Path) -> Path:
@@ -52,8 +64,73 @@ def noisy_source(path: Path) -> Path:
     return path
 
 
-def inference_plan(tmp_path: Path, **changes: object) -> tuple[Path, RunPlan]:
-    source = noisy_source(tmp_path / "noisy-input.npz")
+def canonical_benchmark_source(
+    path: Path,
+    *,
+    sample_count: int | None = None,
+    updates: dict[str, np.ndarray] | None = None,
+    extras: dict[str, np.ndarray] | None = None,
+) -> Path:
+    with np.load(FIXTURE, allow_pickle=False) as data:
+        sample_ids = data["sample_ids"]
+        group_ids = data["group_ids"]
+        source_energy = data["energy"]
+        noisy = data["noisy"]
+        point_count = noisy.shape[1]
+        fixture_sample_count = noisy.shape[0]
+        i0 = np.full((fixture_sample_count, point_count), 100_000.0)
+        ketek = np.maximum(noisy * i0, 0.0)
+        arrays = {
+            "energy": source_energy[0],
+            "energy_unit": np.array("eV"),
+            "experiments": np.array(["Exp2"] * fixture_sample_count),
+            "group_ids": group_ids,
+            "i0_counts": i0,
+            "ketek_counts": ketek,
+            "noisy": noisy,
+            "noisy_i0_counts": i0,
+            "noisy_ketek_counts": ketek,
+            "pseudo_clean": data["clean"],
+            "sample_ids": sample_ids,
+            "sample_seeds": np.arange(fixture_sample_count, dtype=np.uint64),
+            "source_energy": source_energy,
+            "source_paths": np.array(
+                [f"sample-{index}.dat" for index in range(fixture_sample_count)]
+            ),
+            "source_sha256": np.array(
+                [f"{index + 1:064x}" for index in range(fixture_sample_count)]
+            ),
+            "splits": np.array(["train"] * fixture_sample_count),
+        }
+    selected_count = sample_count
+    if selected_count is not None:
+        for key in (
+            "experiments",
+            "group_ids",
+            "i0_counts",
+            "ketek_counts",
+            "noisy",
+            "noisy_i0_counts",
+            "noisy_ketek_counts",
+            "pseudo_clean",
+            "sample_ids",
+            "sample_seeds",
+            "source_energy",
+            "source_paths",
+            "source_sha256",
+            "splits",
+        ):
+            arrays[key] = arrays[key][:selected_count]
+    if updates is not None:
+        arrays.update(updates)
+    if extras is not None:
+        arrays.update(extras)
+    np.savez(path, **arrays)
+    return path
+
+
+def inference_plan(tmp_path: Path, **changes: object) -> tuple[Path, RunPlanV3]:
+    source = canonical_benchmark_source(tmp_path / "benchmark-input.npz")
     values: dict[str, object] = {
         "dataset": dataset_for_source(source),
         "verdict": verdict_for_source(source),
@@ -100,9 +177,9 @@ def test_local_savgol_smoke_publishes_a_complete_prediction_bundle_without_scori
     predictions_data = json.loads(
         (run_plan.output_directory / "predictions.json").read_text()
     )
-    bundle = PredictionBundleV2.model_validate(predictions_data)
-    assert bundle.schema_version == "hyperspectrum-prediction/v2"
-    assert bundle.provenance["plan_schema_version"] == "hyperspectrum-run-plan/v2"
+    bundle = PredictionBundleV3.model_validate(predictions_data)
+    assert bundle.schema_version == "hyperspectrum-prediction/v3"
+    assert bundle.provenance["plan_schema_version"] == "hyperspectrum-run-plan/v3"
     run_data = json.loads((run_plan.output_directory / "run.json").read_text())
     assert returned == bundle
     assert len(bundle.predictions) == 3
@@ -110,12 +187,26 @@ def test_local_savgol_smoke_publishes_a_complete_prediction_bundle_without_scori
     assert bundle.provenance["model_digest"] == run_plan.model_digest
     assert bundle.provenance["tool_digest"] == run_plan.tool_digest
     assert bundle.provenance["implementation_digest"] == run_plan.implementation_digest
-    assert bundle.provenance["data_digest"] == run_plan.data_digest
+    assert bundle.provenance["source_dataset_digest"] == SOURCE_DATASET_DIGEST
+    assert bundle.provenance["source_content_manifest_digest"] == (
+        SOURCE_CONTENT_MANIFEST_DIGEST
+    )
+    assert bundle.provenance["benchmark_asset_digest"] == (
+        run_plan.benchmark_asset_digest
+    )
+    assert len(
+        {
+            run_plan.source_dataset_digest,
+            run_plan.source_content_manifest_digest,
+            run_plan.benchmark_asset_digest,
+        }
+    ) == 3
+    assert "data_digest" not in bundle.provenance
     assert bundle.provenance["environment_digest"] == run_plan.environment_digest
     assert bundle.provenance["weight_digest"] == "none"
     assert bundle.provenance["data_origin"] == "synthetic-test"
     assert run_data == {
-        "schema_version": "hyperspectrum-run/v1",
+        "schema_version": "hyperspectrum-run/v2",
         "run_id": bundle.run_id,
         "status": "completed",
         "planned_sample_count": 3,
@@ -127,7 +218,9 @@ def test_local_savgol_smoke_publishes_a_complete_prediction_bundle_without_scori
         "tool_digest": run_plan.tool_digest,
         "implementation_digest": run_plan.implementation_digest,
         "weight_digest": "none",
-        "data_digest": run_plan.data_digest,
+        "source_dataset_digest": run_plan.source_dataset_digest,
+        "source_content_manifest_digest": run_plan.source_content_manifest_digest,
+        "benchmark_asset_digest": run_plan.benchmark_asset_digest,
         "environment_digest": run_plan.environment_digest,
     }
     for artifact in bundle.predictions:
@@ -146,6 +239,55 @@ def test_local_savgol_smoke_publishes_a_complete_prediction_bundle_without_scori
             assert str(output["sample_id"]) in selected
     assert_no_scoring_fields(predictions_data)
     assert_no_scoring_fields(run_data)
+
+
+def test_legacy_v2_plan_still_executes_and_emits_v2_prediction(
+    tmp_path: Path,
+) -> None:
+    source = noisy_source(tmp_path / "legacy-noisy-input.npz")
+    current = plan(
+        tmp_path,
+        dataset=dataset_for_source(source),
+        verdict=verdict_for_source(source),
+        selected_sample_ids=fixture_ids(),
+    )
+    raw = current.model_dump(mode="json")
+    raw["schema_version"] = "hyperspectrum-run-plan/v2"
+    raw["data_digest"] = raw.pop("benchmark_asset_digest")
+    del raw["source_dataset_digest"]
+    del raw["source_content_manifest_digest"]
+    legacy = RunPlanV2.model_validate(raw)
+
+    bundle = execute_local_run(
+        legacy,
+        tool=savgol(),
+        selected_sample_ids=fixture_ids(),
+        source_npz=source,
+    )
+
+    assert isinstance(bundle, PredictionBundleV2)
+    assert bundle.schema_version == "hyperspectrum-prediction/v2"
+    assert bundle.provenance["data_digest"] == legacy.data_digest
+
+
+def test_v3_plan_rejects_legacy_five_key_inference_npz(tmp_path: Path) -> None:
+    source = noisy_source(tmp_path / "legacy-noisy-input.npz")
+    run_plan = plan(
+        tmp_path,
+        dataset=dataset_for_source(source),
+        verdict=verdict_for_source(source),
+        selected_sample_ids=fixture_ids(),
+    )
+
+    with pytest.raises(ValueError, match="v3.*canonical benchmark"):
+        execute_local_run(
+            run_plan,
+            tool=savgol(),
+            selected_sample_ids=fixture_ids(),
+            source_npz=source,
+        )
+
+    assert not run_plan.output_directory.exists()
 
 
 def test_executor_rejects_selection_that_differs_from_the_plan(tmp_path: Path) -> None:
@@ -257,16 +399,7 @@ def test_partial_input_materialization_aborts_without_a_final_run_directory(
     tmp_path: Path,
 ) -> None:
     # Break caught: execution could silently filter missing selected samples and publish partial output.
-    partial = tmp_path / "partial.npz"
-    with np.load(FIXTURE, allow_pickle=False) as data:
-        np.savez(
-            partial,
-            energy=data["energy"][:2],
-            noisy=data["noisy"][:2],
-            sample_ids=data["sample_ids"][:2],
-            group_ids=data["group_ids"][:2],
-            energy_unit=data["energy_unit"],
-        )
+    partial = canonical_benchmark_source(tmp_path / "partial.npz", sample_count=2)
     run_plan = plan(
         tmp_path,
         dataset=dataset_for_source(partial),
@@ -338,14 +471,15 @@ def test_model_failures_are_recorded_one_for_one_without_disappearing(
 def test_sample_ids_cannot_escape_the_array_artifact_directory(tmp_path: Path) -> None:
     # Break caught: using a sample ID as a filename could overwrite files outside the run.
     malicious_id = "../../escape"
-    source = tmp_path / "malicious-id.npz"
-    np.savez(
-        source,
-        energy=np.array([[1.0, 2.0, 3.0, 4.0, 5.0]]),
-        noisy=np.array([[0.0, 0.2, 0.8, 0.3, 0.1]]),
-        sample_ids=np.array([malicious_id]),
-        group_ids=np.array(["synthetic"]),
-        energy_unit=np.array("eV"),
+    source = canonical_benchmark_source(
+        tmp_path / "malicious-id.npz",
+        sample_count=1,
+        updates={
+            "energy": np.array([[1.0, 2.0, 3.0, 4.0, 5.0]]),
+            "noisy": np.array([[0.0, 0.2, 0.8, 0.3, 0.1]]),
+            "sample_ids": np.array([malicious_id]),
+            "group_ids": np.array(["synthetic"]),
+        },
     )
     run_plan = plan(
         tmp_path,
@@ -403,14 +537,10 @@ def test_dry_run_plan_cannot_execute_or_materialize_inputs(tmp_path: Path) -> No
 def test_inference_source_rejects_every_extra_array_before_tool_loading(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, forbidden_key: str
 ) -> None:
-    source = tmp_path / f"forbidden-{forbidden_key}.npz"
-    with np.load(FIXTURE, allow_pickle=False) as data:
-        values = {
-            key: data[key]
-            for key in ("energy", "noisy", "sample_ids", "group_ids", "energy_unit")
-        }
-    values[forbidden_key] = np.array(["must-not-cross-boundary"])
-    np.savez(source, **values)
+    source = canonical_benchmark_source(
+        tmp_path / f"forbidden-{forbidden_key}.npz",
+        extras={forbidden_key: np.array(["must-not-cross-boundary"])},
+    )
     run_plan = plan(
         tmp_path,
         selected_sample_ids=fixture_ids(1),
@@ -423,7 +553,7 @@ def test_inference_source_rejects_every_extra_array_before_tool_loading(
 
     monkeypatch.setattr(local, "_load_savgol_callable", forbidden_loader)
 
-    with pytest.raises(ValueError, match="inference-only"):
+    with pytest.raises(ValueError, match="v3.*canonical benchmark"):
         execute_local_run(
             run_plan,
             tool=savgol(),
@@ -434,7 +564,7 @@ def test_inference_source_rejects_every_extra_array_before_tool_loading(
     assert not run_plan.output_directory.exists()
 
 
-def test_separately_digested_noisy_only_source_executes_successfully(
+def test_legacy_v2_separately_digested_noisy_only_source_executes_successfully(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "noisy-only.npz"
@@ -447,6 +577,33 @@ def test_separately_digested_noisy_only_source_executes_successfully(
             group_ids=data["group_ids"],
             energy_unit=data["energy_unit"],
         )
+    current = plan(
+        tmp_path,
+        selected_sample_ids=fixture_ids(2),
+        dataset=dataset_for_source(source),
+        verdict=verdict_for_source(source),
+    )
+    raw = current.model_dump(mode="json")
+    raw["schema_version"] = "hyperspectrum-run-plan/v2"
+    raw["data_digest"] = raw.pop("benchmark_asset_digest")
+    del raw["source_dataset_digest"]
+    del raw["source_content_manifest_digest"]
+    run_plan = RunPlanV2.model_validate(raw)
+
+    bundle = execute_local_run(
+        run_plan,
+        tool=savgol(),
+        selected_sample_ids=fixture_ids(2),
+        source_npz=source,
+    )
+
+    assert len(bundle.predictions) == 2
+
+
+def test_canonical_materializer_bundle_executes_without_a_format_bridge(
+    tmp_path: Path,
+) -> None:
+    source = canonical_benchmark_source(tmp_path / "benchmark.npz")
     run_plan = plan(
         tmp_path,
         selected_sample_ids=fixture_ids(2),
@@ -461,13 +618,13 @@ def test_separately_digested_noisy_only_source_executes_successfully(
         source_npz=source,
     )
 
+    assert isinstance(bundle, PredictionBundleV3)
     assert len(bundle.predictions) == 2
 
 
 def test_structured_noisy_array_is_rejected_before_tool_loading(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    source = tmp_path / "structured-noisy.npz"
     with np.load(FIXTURE, allow_pickle=False) as data:
         noisy = np.empty(
             data["noisy"].shape,
@@ -475,14 +632,9 @@ def test_structured_noisy_array_is_rejected_before_tool_loading(
         )
         noisy["signal"] = data["noisy"]
         noisy["ground_truth"] = data["clean"]
-        np.savez(
-            source,
-            energy=data["energy"],
-            noisy=noisy,
-            sample_ids=data["sample_ids"],
-            group_ids=data["group_ids"],
-            energy_unit=data["energy_unit"],
-        )
+    source = canonical_benchmark_source(
+        tmp_path / "structured-noisy.npz", updates={"noisy": noisy}
+    )
     run_plan = plan(
         tmp_path,
         selected_sample_ids=fixture_ids(1),
@@ -554,16 +706,11 @@ def test_structured_noisy_array_is_rejected_before_tool_loading(
 def test_unsafe_energy_is_rejected_before_entrypoint_or_tool_loading(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, energy: np.ndarray
 ) -> None:
-    source = tmp_path / "unsafe-energy.npz"
-    with np.load(FIXTURE, allow_pickle=False) as data:
-        np.savez(
-            source,
-            energy=energy,
-            noisy=data["noisy"][:1],
-            sample_ids=data["sample_ids"][:1],
-            group_ids=data["group_ids"][:1],
-            energy_unit=data["energy_unit"],
-        )
+    source = canonical_benchmark_source(
+        tmp_path / "unsafe-energy.npz",
+        sample_count=1,
+        updates={"energy": energy},
+    )
     run_plan = plan(
         tmp_path,
         selected_sample_ids=fixture_ids(1),
@@ -604,16 +751,11 @@ def test_unsafe_energy_is_rejected_before_entrypoint_or_tool_loading(
 def test_exact_integer_energy_axes_execute_after_float64_canonicalization(
     tmp_path: Path, energy: np.ndarray
 ) -> None:
-    source = tmp_path / "integer-energy.npz"
-    with np.load(FIXTURE, allow_pickle=False) as data:
-        np.savez(
-            source,
-            energy=energy,
-            noisy=data["noisy"][:1],
-            sample_ids=data["sample_ids"][:1],
-            group_ids=data["group_ids"][:1],
-            energy_unit=data["energy_unit"],
-        )
+    source = canonical_benchmark_source(
+        tmp_path / "integer-energy.npz",
+        sample_count=1,
+        updates={"energy": energy},
+    )
     run_plan = plan(
         tmp_path,
         selected_sample_ids=fixture_ids(1),
@@ -745,7 +887,7 @@ def test_executor_refuses_to_overwrite_an_existing_run_directory(
     assert marker.read_text() == "original"
 
 
-def test_executor_hashes_source_bytes_and_rejects_a_different_content_digest(
+def test_executor_hashes_source_bytes_and_rejects_a_different_asset_digest(
     tmp_path: Path,
 ) -> None:
     # Break caught: a caller could assert a planned digest while supplying unrelated input bytes.
@@ -754,7 +896,7 @@ def test_executor_hashes_source_bytes_and_rejects_a_different_content_digest(
     shutil.copyfile(FIXTURE, changed)
     changed.write_bytes(changed.read_bytes() + b"changed")
 
-    with pytest.raises(ValueError, match="data digest"):
+    with pytest.raises(ValueError, match="benchmark asset digest"):
         execute_local_run(
             run_plan,
             tool=savgol(),

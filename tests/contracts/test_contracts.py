@@ -12,6 +12,7 @@ from hyperspectrum.contracts import (
     ObservationBundle,
     PredictionBundle,
     PredictionBundleV2,
+    PredictionBundleV3,
     TaskSpec,
 )
 
@@ -242,6 +243,69 @@ def test_prediction_v2_rejects_all_zero_sha256_sentinels(field: str) -> None:
         PredictionBundleV2(
             schema_version="hyperspectrum-prediction/v2",
             run_id="run-v2",
+            task_id="xas-denoising",
+            predictions=(artifact(role="prediction"),),
+            failures=(),
+            provenance=provenance,
+        )
+
+
+def prediction_v3_provenance() -> dict[str, str]:
+    return {
+        "model_digest": "1" * 64,
+        "tool_digest": "2" * 64,
+        "implementation_digest": "3" * 64,
+        "weight_digest": "none",
+        "source_dataset_digest": "4" * 64,
+        "source_content_manifest_digest": "5" * 64,
+        "benchmark_asset_digest": "6" * 64,
+        "environment_digest": "7" * 64,
+        "plan_digest": "8" * 64,
+        "plan_schema_version": "hyperspectrum-run-plan/v3",
+        "dataset_code": "public-xas",
+        "dataset_version": "2026.08.1",
+    }
+
+
+def test_prediction_v3_requires_three_distinct_explicit_digest_classes() -> None:
+    prediction = PredictionBundleV3(
+        schema_version="hyperspectrum-prediction/v3",
+        run_id="run-v3",
+        task_id="xas-denoising",
+        predictions=(artifact(role="prediction"),),
+        failures=(),
+        provenance=prediction_v3_provenance(),
+    )
+
+    assert "data_digest" not in prediction.provenance
+    assert len(
+        {
+            prediction.provenance["source_dataset_digest"],
+            prediction.provenance["source_content_manifest_digest"],
+            prediction.provenance["benchmark_asset_digest"],
+        }
+    ) == 3
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_dataset_digest", "not-a-sha"),
+        ("source_content_manifest_digest", "A" * 64),
+        ("benchmark_asset_digest", "0" * 64),
+        ("plan_schema_version", "hyperspectrum-run-plan/v2"),
+    ],
+)
+def test_prediction_v3_rejects_ambiguous_digest_provenance(
+    field: str, value: str
+) -> None:
+    provenance = prediction_v3_provenance()
+    provenance[field] = value
+
+    with pytest.raises(ValidationError, match=field):
+        PredictionBundleV3(
+            schema_version="hyperspectrum-prediction/v3",
+            run_id="run-v3",
             task_id="xas-denoising",
             predictions=(artifact(role="prediction"),),
             failures=(),

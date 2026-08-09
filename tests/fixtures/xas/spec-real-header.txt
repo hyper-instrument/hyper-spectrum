@@ -1,0 +1,3 @@
+#S 1  kscan energy 5723 1
+#N 16
+#L energy    Epoch  Seconds  i0  i0s  xicr  xocr  xlt  xdt  ketek  pico  keteki0  xes_temp1  xes_temp2  Monitor  Detector

@@ -27,13 +27,17 @@ scoring, reports, and leaderboards.
 ## Plan First
 
 Confirm the requested output directory does not exist; choose a new path rather
-than deleting or overwriting it. Create a non-executable review plan:
+than deleting or overwriting it. The benchmark manifest must identify three
+separate SHA-256 classes: the source dataset identity, the verified source
+content manifest, and the derived benchmark NPZ bytes. Create a non-executable
+review plan:
 
 ```bash
 .venv/bin/hyperspectrum run plan \
   --task-file TASK.json \
   --candidate-file CANDIDATE.json \
   --verdict-file VERDICT.json \
+  --benchmark-manifest-file BENCHMARK_DIR/manifest.json \
   --tool-id savgol \
   --output-directory RUN_DIR \
   --sample-id SAMPLE_ID \
@@ -42,15 +46,17 @@ than deleting or overwriting it. Create a non-executable review plan:
   --json
 ```
 
-Preserve the single envelope, plan digest, dataset/tool/implementation/weight/
-environment digests, resource budget, parameters, sample limit, destination,
-warnings, and blockers as evidence.
+Preserve the single envelope, plan digest, all three data identity digests,
+tool/implementation/weight/environment digests, resource budget, parameters,
+sample limit, destination, warnings, and blockers as evidence. Never assert
+that the derived asset SHA equals either source identity.
 
 Repeat `--sample-id` to bind every predeclared sample ID during planning, in the
 exact deterministic execution order. Use the identical ordered IDs for dry-run,
 the executable plan, and `run local`; changing a member or its order requires a
-new `hyperspectrum-run-plan/v2` and plan digest. Never execute or migrate a v1
-plan: it cannot prove a bound sample selection. Re-plan with repeated
+new `hyperspectrum-run-plan/v3` and plan digest. Never execute or migrate a v1
+plan: it cannot prove a bound sample selection. v2 remains executable only for
+existing artifacts. Re-plan with repeated
 `--sample-id` options instead.
 
 Ground truth is readiness and later ACE-evaluation evidence only. Never read clean
@@ -77,9 +83,14 @@ After explicit local-run authorization, re-check that `RUN_DIR` is absent, repea
 ```
 
 Repeat `--sample-id` for each predeclared sample. Supply noisy inference inputs;
-do not materialize clean targets for HyperSpectrum. The inference-only NPZ must
-contain exactly `energy`, `noisy`, `sample_ids`, `group_ids`, and `energy_unit`.
-Reject every extra member, including metadata, labels, targets, ground truth,
-metrics, and scores. Return the unaltered envelope and artifact/digest evidence.
+do not inspect targets to choose parameters or samples. A legacy v2
+inference-only NPZ must contain exactly `energy`, `noisy`, `sample_ids`,
+`group_ids`, and `energy_unit`. A v3 run requires the canonical XANES benchmark
+NPZ with the exact 16-key materializer contract recorded in its fully validated
+manifest; the executor exposes
+only energy, noisy signal, IDs, groups, and unit to model code. Its target must
+be labeled `pseudo-clean frozen measurement` and never physical noiseless ground
+truth. Reject every unrecognized extra member, label, metric, or score. Return
+the unaltered envelope and artifact/digest evidence.
 Exit `2` means invalid/not ready, `3` auth/connection, `4` missing asset/tool,
 and `5` execution failure: report and stop without fallback.

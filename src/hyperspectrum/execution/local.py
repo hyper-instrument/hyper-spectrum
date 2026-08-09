@@ -21,12 +21,18 @@ from uuid import uuid4
 
 import numpy as np
 
-from hyperspectrum.contracts import ArtifactRef, AxisSpec, PredictionBundleV2
+from hyperspectrum.contracts import (
+    ArtifactRef,
+    AxisSpec,
+    PredictionBundleV2,
+    PredictionBundleV3,
+)
 from hyperspectrum.registry.models import ToolManifest
 
 from .plan import (
     ResolvedEntrypoint,
-    RunPlan,
+    RunPlanType,
+    RunPlanV2,
     canonical_digest,
     canonical_json_bytes,
     current_environment_digest,
@@ -55,12 +61,12 @@ class _InferenceSource:
 
 
 def execute_local_run(
-    plan: RunPlan,
+    plan: RunPlanType,
     *,
     tool: ToolManifest,
     selected_sample_ids: Sequence[str],
     source_npz: Path,
-) -> PredictionBundleV2:
+) -> PredictionBundleV2 | PredictionBundleV3:
     """Execute one complete local SavGol input set and publish it atomically."""
 
     if plan.dry_run:
@@ -79,9 +85,20 @@ def execute_local_run(
         )
     source_bytes = source_npz.read_bytes()
     source_digest = sha256(source_bytes).hexdigest()
-    if source_digest != plan.data_digest:
-        raise ValueError("source NPZ data digest does not match the immutable plan")
-    inference_source = _load_inference_source(source_bytes, selected)
+    expected_asset_digest = (
+        plan.data_digest
+        if isinstance(plan, RunPlanV2)
+        else plan.benchmark_asset_digest
+    )
+    if source_digest != expected_asset_digest:
+        raise ValueError(
+            "source NPZ benchmark asset digest does not match the immutable plan"
+        )
+    inference_source = _load_inference_source(
+        source_bytes,
+        selected,
+        require_canonical_benchmark=not isinstance(plan, RunPlanV2),
+    )
     resolved_entrypoint = _verify_savgol_identity(plan, tool)
     resolved_tool = _load_savgol_callable(resolved_entrypoint)
     try:
@@ -133,7 +150,9 @@ def _validate_selection(
     return selected
 
 
-def _verify_savgol_identity(plan: RunPlan, tool: ToolManifest) -> ResolvedEntrypoint:
+def _verify_savgol_identity(
+    plan: RunPlanType, tool: ToolManifest
+) -> ResolvedEntrypoint:
     if plan.tool_id != "savgol" or tool.id != "savgol":
         raise ValueError("M0 local execution supports only the savgol tool")
     if tool.entrypoint != "hyperspectrum.plugins.xas.baselines:savgol_filter":
@@ -255,18 +274,48 @@ def _load_selected_spectra(
 
 
 def _load_inference_source(
-    source_bytes: bytes, selected: tuple[str, ...]
+    source_bytes: bytes,
+    selected: tuple[str, ...],
+    *,
+    require_canonical_benchmark: bool,
 ) -> _InferenceSource:
     """Fully validate and detach noisy inference data before tool code loads."""
 
-    allowed = {"energy", "noisy", "sample_ids", "group_ids", "energy_unit"}
+    inference_only_keys = {
+        "energy",
+        "noisy",
+        "sample_ids",
+        "group_ids",
+        "energy_unit",
+    }
+    benchmark_keys = inference_only_keys | {
+        "experiments",
+        "i0_counts",
+        "ketek_counts",
+        "noisy_i0_counts",
+        "noisy_ketek_counts",
+        "pseudo_clean",
+        "sample_seeds",
+        "source_energy",
+        "source_paths",
+        "source_sha256",
+        "splits",
+    }
     with np.load(io.BytesIO(source_bytes), allow_pickle=False) as source:
         observed = set(source.files)
-        if observed != allowed or len(source.files) != len(allowed):
-            missing = sorted(allowed - observed)
-            extra = sorted(observed - allowed)
+        is_canonical_benchmark = observed == benchmark_keys and len(
+            source.files
+        ) == len(benchmark_keys)
+        is_inference_only = observed == inference_only_keys and len(
+            source.files
+        ) == len(inference_only_keys)
+        if require_canonical_benchmark and not is_canonical_benchmark:
+            raise ValueError("v3 execution requires the canonical benchmark NPZ")
+        if not is_canonical_benchmark and not is_inference_only:
+            missing = sorted(inference_only_keys - observed)
+            extra = sorted(observed - inference_only_keys)
             raise ValueError(
-                "inference-only NPZ keys must match exactly; "
+                "inference-only or canonical benchmark NPZ keys must match exactly; "
                 f"missing={missing}, extra={extra}"
             )
         energy = np.array(source["energy"], copy=True)
@@ -298,6 +347,8 @@ def _load_inference_source(
     sample_ids = tuple(str(value) for value in sample_id_values)
     group_ids = tuple(str(value) for value in group_id_values)
     energy_unit = str(energy_unit_value)
+    if is_canonical_benchmark and energy.ndim == 1 and noisy.ndim == 2:
+        energy = np.broadcast_to(energy, noisy.shape).copy()
     malformed = (
         energy.ndim != 2
         or noisy.ndim != 2
@@ -352,7 +403,7 @@ def _canonical_float64(array: Any, *, name: str) -> Any:
     return canonical
 
 
-def _savgol_parameters(plan: RunPlan) -> tuple[int, int]:
+def _savgol_parameters(plan: RunPlanType) -> tuple[int, int]:
     window_length = plan.parameters.get("window_length", 5)
     polyorder = plan.parameters.get("polyorder", 2)
     allowed = {"window_length", "polyorder"}
@@ -391,11 +442,11 @@ def _validate_results(
 
 def _write_run(
     directory: Path,
-    plan: RunPlan,
+    plan: RunPlanType,
     selected: tuple[str, ...],
     results: Sequence[object],
     resolved_tool: _ResolvedSavGol,
-) -> PredictionBundleV2:
+) -> PredictionBundleV2 | PredictionBundleV3:
     arrays_directory = directory / "arrays"
     arrays_directory.mkdir()
     predictions: list[ArtifactRef] = []
@@ -419,35 +470,69 @@ def _write_run(
     _fsync_directory(arrays_directory)
 
     run_id = f"run-{plan.plan_digest}"
-    bundle = PredictionBundleV2.model_validate(
-        {
-            "schema_version": "hyperspectrum-prediction/v2",
-            "run_id": run_id,
-            "task_id": plan.task.id,
-            "predictions": predictions,
-            "failures": failures,
-            "provenance": {
-                "model_digest": plan.model_digest,
-                "tool_digest": plan.tool_digest,
-                "implementation_digest": plan.implementation_digest,
-                "data_digest": plan.data_digest,
-                "environment_digest": plan.environment_digest,
-                "weight_digest": plan.weight_digest,
-                "plan_digest": plan.plan_digest,
-                "plan_schema_version": plan.schema_version,
-                "dataset_code": plan.dataset_code,
-                "dataset_version": plan.dataset_version,
-                "backend": plan.backend,
-                "data_origin": plan.data_origin,
-                "parameters": plan.model_dump(mode="json")["parameters"],
-            },
-        },
-    )
+    common_provenance = {
+        "model_digest": plan.model_digest,
+        "tool_digest": plan.tool_digest,
+        "implementation_digest": plan.implementation_digest,
+        "environment_digest": plan.environment_digest,
+        "weight_digest": plan.weight_digest,
+        "plan_digest": plan.plan_digest,
+        "plan_schema_version": plan.schema_version,
+        "dataset_code": plan.dataset_code,
+        "dataset_version": plan.dataset_version,
+        "backend": plan.backend,
+        "data_origin": plan.data_origin,
+        "parameters": plan.model_dump(mode="json")["parameters"],
+    }
+    if isinstance(plan, RunPlanV2):
+        bundle: PredictionBundleV2 | PredictionBundleV3 = (
+            PredictionBundleV2.model_validate(
+                {
+                    "schema_version": "hyperspectrum-prediction/v2",
+                    "run_id": run_id,
+                    "task_id": plan.task.id,
+                    "predictions": predictions,
+                    "failures": failures,
+                    "provenance": {
+                        **common_provenance,
+                        "data_digest": plan.data_digest,
+                    },
+                }
+            )
+        )
+        run_identity: dict[str, object] = {"data_digest": plan.data_digest}
+        run_schema_version = "hyperspectrum-run/v1"
+    else:
+        bundle = PredictionBundleV3.model_validate(
+            {
+                "schema_version": "hyperspectrum-prediction/v3",
+                "run_id": run_id,
+                "task_id": plan.task.id,
+                "predictions": predictions,
+                "failures": failures,
+                "provenance": {
+                    **common_provenance,
+                    "source_dataset_digest": plan.source_dataset_digest,
+                    "source_content_manifest_digest": (
+                        plan.source_content_manifest_digest
+                    ),
+                    "benchmark_asset_digest": plan.benchmark_asset_digest,
+                },
+            }
+        )
+        run_identity = {
+            "source_dataset_digest": plan.source_dataset_digest,
+            "source_content_manifest_digest": (
+                plan.source_content_manifest_digest
+            ),
+            "benchmark_asset_digest": plan.benchmark_asset_digest,
+        }
+        run_schema_version = "hyperspectrum-run/v2"
     _write_json(directory / "predictions.json", bundle.model_dump(mode="json"))
     _write_json(
         directory / "run.json",
         {
-            "schema_version": "hyperspectrum-run/v1",
+            "schema_version": run_schema_version,
             "run_id": run_id,
             "status": "completed_with_failures" if failures else "completed",
             "planned_sample_count": len(selected),
@@ -459,7 +544,7 @@ def _write_run(
             "tool_digest": plan.tool_digest,
             "implementation_digest": plan.implementation_digest,
             "weight_digest": plan.weight_digest,
-            "data_digest": plan.data_digest,
+            **run_identity,
             "environment_digest": plan.environment_digest,
         },
     )

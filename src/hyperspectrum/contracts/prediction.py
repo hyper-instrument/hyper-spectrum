@@ -12,10 +12,9 @@ from typing_extensions import Self
 from .artifact import ArtifactRef
 from .json import FrozenJsonMapping, freeze_json_mapping, thaw_json_mapping
 
-_REQUIRED_DIGESTS = (
+_COMMON_REQUIRED_DIGESTS = (
     "model_digest",
     "tool_digest",
-    "data_digest",
     "environment_digest",
 )
 _V2_SHA256_DIGESTS = (
@@ -23,6 +22,16 @@ _V2_SHA256_DIGESTS = (
     "tool_digest",
     "implementation_digest",
     "data_digest",
+    "environment_digest",
+    "plan_digest",
+)
+_V3_SHA256_DIGESTS = (
+    "model_digest",
+    "tool_digest",
+    "implementation_digest",
+    "source_dataset_digest",
+    "source_content_manifest_digest",
+    "benchmark_asset_digest",
     "environment_digest",
     "plan_digest",
 )
@@ -64,7 +73,7 @@ class _PredictionBundleBase(BaseModel):
     @classmethod
     def require_provenance_digests(cls, value: FrozenJsonMapping) -> FrozenJsonMapping:
         """Ensure every prediction can be traced to immutable inputs and runtime."""
-        for key in _REQUIRED_DIGESTS:
+        for key in _COMMON_REQUIRED_DIGESTS:
             digest = value.get(key)
             if not isinstance(digest, str) or not digest.strip():
                 raise ValueError(f"provenance {key} must be a non-empty string")
@@ -96,6 +105,14 @@ class PredictionBundle(_PredictionBundleBase):
 
     schema_version: Literal["hyperspectrum-prediction/v1"]
 
+    @field_validator("provenance")
+    @classmethod
+    def require_v1_data_identity(cls, value: FrozenJsonMapping) -> FrozenJsonMapping:
+        data_digest = value.get("data_digest")
+        if not isinstance(data_digest, str) or not data_digest.strip():
+            raise ValueError("provenance data_digest must be a non-empty string")
+        return value
+
 
 class PredictionBundleV2(_PredictionBundleBase):
     """Selection-bound prediction contract for M0 success handoffs."""
@@ -125,6 +142,53 @@ class PredictionBundleV2(_PredictionBundleBase):
         if value.get("plan_schema_version") != "hyperspectrum-run-plan/v2":
             raise ValueError(
                 "provenance plan_schema_version must identify a selection-bound v2 plan"
+            )
+        for key in ("dataset_code", "dataset_version"):
+            identity = value.get(key)
+            if not isinstance(identity, str) or not identity.strip():
+                raise ValueError(f"provenance {key} must be non-blank")
+        return value
+
+
+class PredictionBundleV3(_PredictionBundleBase):
+    """Prediction provenance with unambiguous source and derived-asset digests."""
+
+    schema_version: Literal["hyperspectrum-prediction/v3"]
+
+    @field_validator("provenance")
+    @classmethod
+    def require_v3_provenance(cls, value: FrozenJsonMapping) -> FrozenJsonMapping:
+        if "data_digest" in value:
+            raise ValueError("provenance data_digest is forbidden in v3")
+        for key in _V3_SHA256_DIGESTS:
+            digest = value.get(key)
+            if (
+                not isinstance(digest, str)
+                or _SHA256.fullmatch(digest) is None
+                or digest == "0" * 64
+            ):
+                raise ValueError(f"provenance {key} must be a lowercase SHA-256")
+        explicit_identities = {
+            value["source_dataset_digest"],
+            value["source_content_manifest_digest"],
+            value["benchmark_asset_digest"],
+        }
+        if len(explicit_identities) != 3:
+            raise ValueError(
+                "provenance benchmark_asset_digest must be distinct from source identities"
+            )
+        weight_digest = value.get("weight_digest")
+        if weight_digest != "none" and (
+            not isinstance(weight_digest, str)
+            or _SHA256.fullmatch(weight_digest) is None
+            or weight_digest == "0" * 64
+        ):
+            raise ValueError(
+                "provenance weight_digest must be 'none' or a lowercase SHA-256"
+            )
+        if value.get("plan_schema_version") != "hyperspectrum-run-plan/v3":
+            raise ValueError(
+                "provenance plan_schema_version must identify an explicit-digest v3 plan"
             )
         for key in ("dataset_code", "dataset_version"):
             identity = value.get(key)

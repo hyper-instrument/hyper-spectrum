@@ -13,7 +13,7 @@ from importlib.machinery import ModuleSpec, PathFinder
 from importlib.metadata import version
 from importlib.util import resolve_name
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -31,6 +31,7 @@ from hyperspectrum.contracts.json import (
     freeze_json_mapping,
     thaw_json_mapping,
 )
+from hyperspectrum.datasets import BenchmarkAssetIdentity
 from hyperspectrum.hyperdata.models import DatasetCandidate
 from hyperspectrum.registry.models import (
     ResourceBudget,
@@ -60,16 +61,14 @@ def canonical_digest(value: object) -> str:
     return sha256(canonical_json_bytes(value)).hexdigest()
 
 
-class RunPlan(BaseModel):
-    """A detached declaration of every input that determines a run."""
+class _RunPlanBase(BaseModel):
+    """Common detached inputs shared by immutable wire plan versions."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
-    schema_version: Literal["hyperspectrum-run-plan/v2"]
     task: TaskSpec
     dataset_code: str
     dataset_version: str
-    data_digest: str
     tool_id: str
     tool_digest: str
     implementation_digest: str
@@ -99,7 +98,6 @@ class RunPlan(BaseModel):
         return value
 
     @field_validator(
-        "data_digest",
         "tool_digest",
         "implementation_digest",
         "model_digest",
@@ -165,11 +163,63 @@ class RunPlan(BaseModel):
         return type(self).model_validate(data)
 
 
+class RunPlanV2(_RunPlanBase):
+    """Legacy selection-bound plan whose data_digest names input NPZ bytes."""
+
+    schema_version: Literal["hyperspectrum-run-plan/v2"]
+    data_digest: str
+
+    @field_validator("data_digest")
+    @classmethod
+    def require_data_sha256(cls, value: str) -> str:
+        if _SHA256.fullmatch(value) is None:
+            raise ValueError("plan digests must be 64 lowercase hexadecimal characters")
+        return value
+
+
+class RunPlanV3(_RunPlanBase):
+    """Plan with separate source, verified-content, and derived-asset identity."""
+
+    schema_version: Literal["hyperspectrum-run-plan/v3"]
+    source_dataset_digest: str
+    source_content_manifest_digest: str
+    benchmark_asset_digest: str
+
+    @field_validator(
+        "source_dataset_digest",
+        "source_content_manifest_digest",
+        "benchmark_asset_digest",
+    )
+    @classmethod
+    def require_explicit_sha256(cls, value: str) -> str:
+        if _SHA256.fullmatch(value) is None:
+            raise ValueError("plan digests must be 64 lowercase hexadecimal characters")
+        return value
+
+
+RunPlanType: TypeAlias = RunPlanV2 | RunPlanV3
+RunPlan = RunPlanV2
+
+
+def parse_run_plan(value: object) -> RunPlanType:
+    """Dispatch a serialized selection-bound plan without guessing field meaning."""
+
+    if not isinstance(value, Mapping):
+        raise TypeError("run plan must be a JSON object")
+    schema_version = value.get("schema_version")
+    if schema_version == "hyperspectrum-run-plan/v2":
+        return RunPlanV2.model_validate(value)
+    if schema_version == "hyperspectrum-run-plan/v3":
+        return RunPlanV3.model_validate(value)
+    raise ValueError(f"unsupported run plan schema: {schema_version}")
+
+
 def build_run_plan(
     *,
     task: TaskSpec,
     dataset: DatasetCandidate,
     verdict: ReadinessVerdict,
+    benchmark_asset: BenchmarkAssetIdentity,
     tool: ToolManifest,
     availability: ToolAvailability,
     backend: Literal["local"],
@@ -180,15 +230,24 @@ def build_run_plan(
     dry_run: bool,
     parameters: Mapping[str, object],
     data_origin: Literal["real", "synthetic-test"],
-) -> RunPlan:
+) -> RunPlanV3:
     """Build a run plan only after data, task, tool, weight, and resource gates pass."""
 
     dataset_version = dataset.dataset_version
     if dataset_version is None or not dataset_version.strip():
         raise ValueError("dataset version must be pinned before planning")
-    data_digest = dataset.content_digest
-    if data_digest is None or _SHA256.fullmatch(data_digest) is None:
+    catalog_digest = dataset.content_digest
+    if catalog_digest is None or _SHA256.fullmatch(catalog_digest) is None:
         raise ValueError("dataset content digest must be a 64-character SHA-256")
+    if (
+        benchmark_asset.dataset_code != dataset.dataset_code
+        or benchmark_asset.dataset_version != dataset_version
+    ):
+        raise ValueError("benchmark asset dataset identity does not match the dataset")
+    if benchmark_asset.declared_manifest_digest != catalog_digest:
+        raise ValueError(
+            "benchmark asset declared manifest digest does not match the catalog"
+        )
     _require_scoreable_task(task, dataset, verdict)
     _require_compatible_tool(task, tool)
     _require_available_tool(tool, availability)
@@ -204,12 +263,16 @@ def build_run_plan(
             "parameters": thaw_json_mapping(frozen_parameters),
         }
     )
-    return RunPlan(
-        schema_version="hyperspectrum-run-plan/v2",
+    return RunPlanV3(
+        schema_version="hyperspectrum-run-plan/v3",
         task=task,
         dataset_code=dataset.dataset_code,
         dataset_version=dataset_version,
-        data_digest=data_digest,
+        source_dataset_digest=benchmark_asset.source_dataset_digest,
+        source_content_manifest_digest=(
+            benchmark_asset.source_content_manifest_digest
+        ),
+        benchmark_asset_digest=benchmark_asset.benchmark_asset_digest,
         tool_id=tool.id,
         tool_digest=tool.tool_digest,
         implementation_digest=resolved.implementation_digest,

@@ -14,6 +14,12 @@ from jsonschema.exceptions import ValidationError
 SCHEMA_PATH = (
     Path(__file__).parents[2] / "docs" / "evidence" / "xas-m0-selection.schema.json"
 )
+SCHEMA_V2_PATH = (
+    Path(__file__).parents[2]
+    / "docs"
+    / "evidence"
+    / "xas-m0-selection-v2.schema.json"
+)
 
 
 def make_valid_evidence() -> dict[str, Any]:
@@ -150,9 +156,84 @@ def make_valid_evidence() -> dict[str, Any]:
     }
 
 
+def make_valid_evidence_v2() -> dict[str, Any]:
+    """Return the explicit three-digest benchmark handoff."""
+
+    evidence = make_valid_evidence()
+    evidence["schema_version"] = "hyperspectrum-xas-m0-selection/v2"
+    dataset = evidence["dataset"]
+    dataset["source_dataset_digest"] = dataset.pop("content_digest")
+    dataset["source_content_manifest_digest"] = "f" * 64
+    evidence["task"].update(
+        {
+            "ground_truth_roles": ["pseudo_clean_frozen_measurement"],
+            "split_group_keys": ["composition"],
+            "reason_codes": ["frozen_measured_proxy_target"],
+        }
+    )
+    asset = evidence["assets"][0]
+    asset["byte_provenance"].update(
+        {
+            "identity_contract": "registered_derived_asset",
+            "source_content_manifest_digest": "f" * 64,
+        }
+    )
+    asset["semantics"] = {
+        "modality": "xas",
+        "role": "denoising_benchmark",
+        "npz_keys": [
+            "energy",
+            "energy_unit",
+            "experiments",
+            "group_ids",
+            "i0_counts",
+            "ketek_counts",
+            "noisy",
+            "noisy_i0_counts",
+            "noisy_ketek_counts",
+            "pseudo_clean",
+            "sample_ids",
+            "sample_seeds",
+            "source_energy",
+            "source_paths",
+            "source_sha256",
+            "splits",
+        ],
+        "energy_unit": "eV",
+        "target_semantics": "pseudo-clean frozen measurement",
+        "is_physical_noiseless_ground_truth": False,
+    }
+    provenance = evidence["smoke_run"]["provenance"]
+    provenance["prediction_schema_version"] = "hyperspectrum-prediction/v3"
+    provenance["source_dataset_digest"] = provenance.pop("dataset_digest")
+    provenance["source_content_manifest_digest"] = "f" * 64
+    provenance["benchmark_asset_digest"] = provenance.pop("data_digest")
+    handoff = evidence["ace_handoff"]
+    handoff["benchmark_asset_sha256"] = handoff.pop("data_asset_sha256")
+    return evidence
+
+
 @pytest.fixture
 def valid_evidence() -> dict[str, Any]:
     return make_valid_evidence()
+
+
+def test_v2_schema_accepts_explicit_unequal_digest_classes() -> None:
+    schema = json.loads(SCHEMA_V2_PATH.read_text(encoding="utf-8"))
+    validator = Draft202012Validator(
+        schema, format_checker=Draft202012Validator.FORMAT_CHECKER
+    )
+    evidence = make_valid_evidence_v2()
+
+    validator.validate(evidence)
+
+    assert len(
+        {
+            evidence["dataset"]["source_dataset_digest"],
+            evidence["dataset"]["source_content_manifest_digest"],
+            evidence["assets"][0]["sha256"],
+        }
+    ) == 3
 
 
 def _validator() -> Draft202012Validator:

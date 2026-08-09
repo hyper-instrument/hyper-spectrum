@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_xas_m0_evidence import make_valid_evidence
+from test_xas_m0_evidence import make_valid_evidence, make_valid_evidence_v2
 
 from hyperspectrum.evidence import XasM0EvidenceError, validate_xas_m0_evidence
 
@@ -23,6 +23,59 @@ def test_semantic_validator_accepts_one_consistent_success_handoff() -> None:
 
     assert validated == evidence
     assert validated is not evidence
+
+
+def test_semantic_validator_accepts_v2_three_digest_handoff() -> None:
+    evidence = make_valid_evidence_v2()
+
+    validated = validate_xas_m0_evidence(evidence)
+
+    assert validated == evidence
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("assets", 0, "byte_provenance", "source_dataset_digest"), "e" * 64),
+        (("smoke_run", "provenance", "source_dataset_digest"), "e" * 64),
+        (
+            ("assets", 0, "byte_provenance", "source_content_manifest_digest"),
+            "e" * 64,
+        ),
+        (
+            ("smoke_run", "provenance", "source_content_manifest_digest"),
+            "e" * 64,
+        ),
+        (("smoke_run", "provenance", "benchmark_asset_digest"), "e" * 64),
+        (("ace_handoff", "benchmark_asset_sha256"), "e" * 64),
+    ],
+)
+def test_v2_semantic_validator_rejects_cross_class_chain_mismatch(
+    path: tuple[str | int, ...], replacement: str
+) -> None:
+    evidence = make_valid_evidence_v2()
+    target: object = evidence
+    for key in path[:-1]:
+        target = target[key]  # type: ignore[index]
+    target[path[-1]] = replacement  # type: ignore[index]
+
+    with pytest.raises(XasM0EvidenceError) as captured:
+        validate_xas_m0_evidence(evidence)
+
+    assert captured.value.code == "provenance_mismatch"
+
+
+def test_v2_semantic_validator_rejects_asset_digest_equal_to_source_identity() -> None:
+    evidence = make_valid_evidence_v2()
+    source_digest = evidence["dataset"]["source_dataset_digest"]
+    evidence["assets"][0]["sha256"] = source_digest
+    evidence["smoke_run"]["provenance"]["benchmark_asset_digest"] = source_digest
+    evidence["ace_handoff"]["benchmark_asset_sha256"] = source_digest
+
+    with pytest.raises(XasM0EvidenceError) as captured:
+        validate_xas_m0_evidence(evidence)
+
+    assert captured.value.code == "provenance_mismatch"
 
 
 @pytest.mark.parametrize(

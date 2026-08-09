@@ -17,7 +17,9 @@ from hyperspectrum import agent as services
 from hyperspectrum.process_boundary import redact_text, redact_value
 
 app = typer.Typer(no_args_is_help=True, help="Agent-ready spectroscopy runtime.")
-data_app = typer.Typer(no_args_is_help=True, help="Discover spectroscopy data.")
+data_app = typer.Typer(
+    no_args_is_help=True, help="Discover and materialize spectroscopy data."
+)
 task_app = typer.Typer(no_args_is_help=True, help="Recommend evidence-backed tasks.")
 tools_app = typer.Typer(no_args_is_help=True, help="Match registered tools.")
 run_app = typer.Typer(no_args_is_help=True, help="Plan and execute admitted runs.")
@@ -51,6 +53,32 @@ def data_discover(
     """Discover catalog evidence for a spectroscopy modality."""
 
     _invoke(json_output, services.discover_data, modality, profile)
+
+
+@data_app.command("materialize-xanes-spec")
+def data_materialize_xanes_spec(
+    source_root: Annotated[Path, typer.Option("--source-root")],
+    source_declaration_file: Annotated[
+        Path, typer.Option("--source-declaration-file")
+    ],
+    output_directory: Annotated[Path, typer.Option("--output-directory")],
+    dose_fraction: Annotated[float, typer.Option("--dose-fraction")] = 0.25,
+    global_seed: Annotated[int, typer.Option("--global-seed")] = 0,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit one JSON envelope.")
+    ] = False,
+) -> None:
+    """Freeze a verified XANES SPEC tree into a deterministic benchmark."""
+
+    _invoke(
+        json_output,
+        services.materialize_xanes,
+        source_root=source_root,
+        source_declaration_file=source_declaration_file,
+        output_directory=output_directory,
+        dose_fraction=dose_fraction,
+        global_seed=global_seed,
+    )
 
 
 @task_app.command("recommend")
@@ -94,6 +122,9 @@ def run_plan(
     task_file: Annotated[Path, typer.Option("--task-file")],
     candidate_file: Annotated[Path, typer.Option("--candidate-file")],
     verdict_file: Annotated[Path, typer.Option("--verdict-file")],
+    benchmark_manifest_file: Annotated[
+        Path, typer.Option("--benchmark-manifest-file")
+    ],
     tool_id: Annotated[str, typer.Option("--tool-id")],
     output_directory: Annotated[Path, typer.Option("--output-directory")],
     sample_ids: Annotated[list[str], typer.Option("--sample-id")],
@@ -111,6 +142,7 @@ def run_plan(
         task_file=task_file,
         candidate_file=candidate_file,
         verdict_file=verdict_file,
+        benchmark_manifest_file=benchmark_manifest_file,
         tool_id=tool_id,
         output_directory=output_directory,
         max_samples=max_samples,
