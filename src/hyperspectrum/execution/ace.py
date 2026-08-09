@@ -5,28 +5,21 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from importlib.resources import files
 from pathlib import Path
 from typing import cast
-
-import yaml
 
 from hyperspectrum.contracts import PredictionBundleV3, TaskSpec
 from hyperspectrum.contracts.json import freeze_json_mapping
 from hyperspectrum.datasets import load_benchmark_asset_identity, load_denoising_pairs
 from hyperspectrum.datasets.xanes_spec import BenchmarkManifest
 from hyperspectrum.hyperdata.models import DatasetCandidate
-from hyperspectrum.registry import ResourceBudget, ToolRegistry, load_tool_manifest
-from hyperspectrum.registry.models import ToolManifest
+from hyperspectrum.registry import ResourceBudget, ToolRegistry
 from hyperspectrum.tasks.recommend import ReadinessVerdict
 
 from .local import execute_local_run
 from .plan import RunPlanV3, build_run_plan
+from .tools import load_tool_by_id
 
-_TOOL_RESOURCES = {
-    "savgol": "tools/xas/savgol/tool.yaml",
-    "xasdenoise": "tools/xas/xasdenoise/tool.yaml",
-}
 _PSEUDO_CLEAN_LIMITATION = (
     "xas_pseudo_clean_frozen_measurement_not_physical_noiseless_ground_truth"
 )
@@ -137,7 +130,7 @@ def execute_ace_xas_denoising(
         split_group_keys=("compound_id",),
         limitations=(_PSEUDO_CLEAN_LIMITATION,),
     )
-    tool = _load_tool(tool_id)
+    tool = load_tool_by_id(tool_id)
     availability = ToolRegistry((tool,)).availability(tool)
     weights = tuple(weight_files)
     device = parameters.get("device")
@@ -190,14 +183,3 @@ def execute_ace_xas_denoising(
         bundle=bundle,
         artifact_paths=artifact_paths,
     )
-
-
-def _load_tool(tool_id: str) -> ToolManifest:
-    resource_name = _TOOL_RESOURCES.get(tool_id)
-    if resource_name is None:
-        raise ValueError(f"unknown tool: {tool_id}")
-    resource = files("hyperspectrum.resources").joinpath(resource_name)
-    raw = yaml.safe_load(resource.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        raise TypeError("tool manifest must be a mapping")
-    return load_tool_manifest(raw)

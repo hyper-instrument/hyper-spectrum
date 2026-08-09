@@ -293,6 +293,79 @@ def build_run_plan(
     )
 
 
+def build_inference_run_plan(
+    *,
+    task: TaskSpec,
+    dataset_code: str,
+    dataset_version: str,
+    inference_asset_digest: str,
+    tool: ToolManifest,
+    availability: ToolAvailability,
+    backend: Literal["local"],
+    resources: ResourceBudget,
+    max_samples: int,
+    selected_sample_ids: Sequence[str],
+    output_directory: Path,
+    dry_run: bool,
+    parameters: Mapping[str, object],
+    data_origin: Literal["real", "synthetic-test"],
+) -> RunPlanV2:
+    """Plan one run over noisy inputs alone, with no ground truth in reach.
+
+    The tool, weight and resource gates are exactly :func:`build_run_plan`'s —
+    the numerics are not allowed to differ by which side of the boundary asked
+    for them. What is deliberately absent is the readiness gate: a
+    :class:`~hyperspectrum.tasks.recommend.ReadinessVerdict` is a statement that
+    a dataset can be *scored*, and it is derived from ground truth. An inference
+    caller has none and must not be able to assert one, so this returns a
+    :class:`RunPlanV2`, whose data identity is a single asset digest and which
+    has no field a benchmark identity could be put in.
+    """
+
+    if not dataset_code.strip() or not dataset_version.strip():
+        raise ValueError("inference plan dataset identity must be non-blank")
+    if _SHA256.fullmatch(inference_asset_digest) is None:
+        raise ValueError("inference asset digest must be a 64-character SHA-256")
+    _require_compatible_tool(task, tool)
+    _require_available_tool(tool, availability)
+    _require_resources(tool, resources)
+
+    frozen_parameters = freeze_json_mapping(parameters)
+    _require_tool_parameters(tool, frozen_parameters)
+    resolved = resolve_local_entrypoint(tool)
+    weight_digest = _weight_digest(tool)
+    model_digest = canonical_digest(
+        {
+            "tool_digest": tool.tool_digest,
+            "implementation_digest": resolved.implementation_digest,
+            "parameters": thaw_json_mapping(frozen_parameters),
+        }
+    )
+    return RunPlanV2(
+        schema_version="hyperspectrum-run-plan/v2",
+        task=task,
+        dataset_code=dataset_code,
+        dataset_version=dataset_version,
+        data_digest=inference_asset_digest,
+        tool_id=tool.id,
+        tool_digest=tool.tool_digest,
+        implementation_digest=resolved.implementation_digest,
+        weight_digest=weight_digest,
+        model_digest=model_digest,
+        environment_digest=current_environment_digest(),
+        backend=backend,
+        resources=resources,
+        max_samples=max_samples,
+        selection_policy="explicit_order",
+        selection_policy_version="1",
+        selected_sample_ids=tuple(selected_sample_ids),
+        output_directory=output_directory,
+        dry_run=dry_run,
+        parameters=frozen_parameters,
+        data_origin=data_origin,
+    )
+
+
 def _require_scoreable_task(
     task: TaskSpec, dataset: DatasetCandidate, verdict: ReadinessVerdict
 ) -> None:
