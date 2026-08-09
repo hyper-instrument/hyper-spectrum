@@ -8,6 +8,33 @@ local GPU or Bohr, and publishes quantitative results through ACE Benchmark.
 The approved design is documented in
 [`docs/superpowers/specs/2026-08-08-hyper-spectrum-xas-agent-runtime-design.md`](docs/superpowers/specs/2026-08-08-hyper-spectrum-xas-agent-runtime-design.md).
 
+## Reusable spectral denoising contracts
+
+`hyperspectrum.denoising` provides the model-independent M0 contract for XAS/
+XANES/EXAFS, Raman/IR, NMR, mass spectrometry, EELS, and hyperspectral data.
+`SpectrumSample` keeps axes, units, masks, channel labels, sparse/complex
+representation, metadata, and provenance explicit. It never infers a wavelength
+or energy axis from shape and never flattens spectral images for a 1-D model.
+
+Normalization stays outside the denoising model. Per-spectrum transforms persist
+their sample-bound parameters; dataset-fitted transforms accept only samples
+bound to the train partition of a digest-pinned `SplitManifest` and persist the
+manifest digest, ordered training sample/group IDs, training-data digest, and
+parameters. Synthetic noise is likewise injected in its declared native signal
+or count domain before normalization with a fixed seed and provenance.
+
+Models consume `CanonicalDenoisingInput` and declare `ModelCapabilities` for
+axis rank, representation, channels, required normalization, and native-unit
+recovery. The same compatible model can therefore run across modality suites.
+The evaluator emits normalized-space and recovered native-space RMSE/MAE,
+per-modality means, equal-modality macro means for dimensionless normalized
+metrics, and coverage. Native metrics are never averaged across incompatible
+physical units. Incompatible complex, sparse, multi-channel, or multi-axis
+samples are structured skips and are never converted into zero scores.
+
+The detailed contract is documented in
+[`docs/superpowers/specs/2026-08-09-unified-spectral-denoising-design.md`](docs/superpowers/specs/2026-08-09-unified-spectral-denoising-design.md).
+
 ## Agent CLI
 
 HyperSpectrum owns read-only catalog discovery, evidence-backed task and tool
