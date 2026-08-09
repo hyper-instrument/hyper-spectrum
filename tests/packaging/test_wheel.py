@@ -13,8 +13,15 @@ from hashlib import sha256
 from pathlib import Path
 
 import pytest
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_build_backend_is_exactly_pinned_for_reproducible_images() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert project["build-system"]["requires"] == ["uv_build==0.10.10"]
 
 
 def canonical_digest(value: object) -> str:
@@ -831,11 +838,11 @@ def test_installed_discovery_structured_timeout_is_safe_transport_failure(
         (
             "#!/bin/sh\n"
             f"printf '%s\\n' 'connection diagnostic for {placeholder_endpoint} "
-            "{\"phase\":\"connect\"}' >&2\n"
+            '{"phase":"connect"}\' >&2\n'
             "printf '%s\\n' "
-            f"'{{\"ok\":false,\"error\":{{\"code\":\"cli-error\","
-            f"\"message\":\"请求失败 ({placeholder_endpoint}): timed out\","
-            "\"hint\":null}}}'\n"
+            f'\'{{"ok":false,"error":{{"code":"cli-error",'
+            f'"message":"请求失败 ({placeholder_endpoint}): timed out",'
+            '"hint":null}}}\'\n'
             "exit 1\n"
         ),
         encoding="utf-8",
