@@ -95,6 +95,22 @@ The first XAS story uses these commands:
 .venv/bin/hyperspectrum evidence validate --evidence-file XAS_M0_SELECTION.json --json
 ```
 
+The Cu-CHA operando profile is a separate v2 boundary because its quantitative
+target is full-count `mu_trans` as an explicitly named proxy, not the v1 XANES
+SPEC `ketek/i0` contract. Materialize all fixed dose tracks with:
+
+```bash
+.venv/bin/hyperspectrum data materialize-cu-cha --source-root CU_CHA_DAT_DIR --source-declaration-file CU_CHA_SOURCE_DECLARATION.json --output-directory CU_CHA_PROFILE_DIR --json
+```
+
+This produces shared grouped splits plus `0.10`, `0.25`, and `0.50` Poisson
+dose tracks. Each track includes a target-bearing `benchmark.npz` and a
+target-free `inference.npz`. Candidate containers receive only the inference
+asset; scorer-side code retains the proxy target and formally scores only the
+test split. See
+[`docs/dev/2026-08-09-cu-cha-profile-v2.md`](docs/dev/2026-08-09-cu-cha-profile-v2.md)
+for the source declaration and compatibility boundary.
+
 For the fixed-weight adapter, replace `--tool-id savgol` with
 `--tool-id xasdenoise`, add `--weight-file MODEL.pth` to both `run plan` and
 `run local`, and optionally request `--device cpu`, `--device cuda:N`, or the
@@ -118,6 +134,11 @@ request fails when CUDA is unavailable; only `auto` may select CPU.
   which requires the three explicit data identity classes, formatted execution
   digests, non-blank dataset identity, and a v3 selection-bound plan identity.
   Prediction v2 remains paired with legacy plan v2 execution.
+- `hyperspectrum-xas-denoising-profile/v2` is the dataset-profile boundary for
+  Cu-CHA multi-dose proxy evaluation. Its inference assets use the reusable
+  local inference NPZ shape, while ACE v3 canonical benchmark planning still
+  requires a thin profile-v2 adapter. The code never relabels this proxy as
+  physical noiseless ground truth or silently coerces it into the v1 manifest.
 - Successful M0 evidence must pass `evidence validate`. The packaged semantic
   validator runs JSON Schema first, then structural redaction, locator policy,
   provenance equality, asset mapping, and count-order checks.

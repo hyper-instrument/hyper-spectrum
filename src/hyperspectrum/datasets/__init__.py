@@ -1,5 +1,19 @@
 """Dataset-specific adapters that materialize strict scientific contracts."""
 
+from .cu_cha import (
+    CuChaMaterializationResult,
+    CuChaSpectrumIdentity,
+    CuChaTrackResult,
+    ParsedCuChaSpectrum,
+    PoissonThinnedTransmission,
+    build_grouped_balanced_split,
+    derive_cu_cha_seed,
+    load_cu_cha_denoising_pairs,
+    materialize_cu_cha,
+    parse_cu_cha_dat,
+    parse_cu_cha_identity,
+    poisson_thin_transmission,
+)
 from .xanes_spec import (
     BenchmarkAssetIdentity,
     MaterializationResult,
@@ -14,12 +28,24 @@ from .xanes_spec import (
 
 __all__ = [
     "BenchmarkAssetIdentity",
+    "CuChaMaterializationResult",
+    "CuChaSpectrumIdentity",
+    "CuChaTrackResult",
     "MaterializationResult",
+    "ParsedCuChaSpectrum",
     "ParsedXanesSpectrum",
+    "PoissonThinnedTransmission",
     "SourceIntegrityError",
     "SpectrumRejected",
+    "build_grouped_balanced_split",
+    "derive_cu_cha_seed",
     "load_benchmark_asset_identity",
+    "load_cu_cha_denoising_pairs",
     "load_denoising_pairs",
+    "materialize_cu_cha",
     "materialize_xanes_spec",
+    "parse_cu_cha_dat",
+    "parse_cu_cha_identity",
     "parse_xanes_spec",
+    "poisson_thin_transmission",
 ]

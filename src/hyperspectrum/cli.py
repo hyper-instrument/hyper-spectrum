@@ -79,6 +79,26 @@ def data_materialize_xanes_spec(
     )
 
 
+@data_app.command("materialize-cu-cha")
+def data_materialize_cu_cha(
+    source_root: Annotated[Path, typer.Option("--source-root")],
+    source_declaration_file: Annotated[Path, typer.Option("--source-declaration-file")],
+    output_directory: Annotated[Path, typer.Option("--output-directory")],
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit one JSON envelope.")
+    ] = False,
+) -> None:
+    """Freeze a verified Cu-CHA DAT tree into three deterministic dose tracks."""
+
+    _invoke(
+        json_output,
+        services.materialize_cu_cha_profile,
+        source_root=source_root,
+        source_declaration_file=source_declaration_file,
+        output_directory=output_directory,
+    )
+
+
 @task_app.command("recommend")
 def task_recommend(
     candidate_file: Annotated[Path, typer.Option("--candidate-file")],

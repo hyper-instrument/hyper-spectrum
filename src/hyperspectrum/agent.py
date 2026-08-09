@@ -14,6 +14,7 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from hyperspectrum.contracts import TaskSpec
+from hyperspectrum.datasets.cu_cha import materialize_cu_cha
 from hyperspectrum.datasets.xanes_spec import (
     SourceIntegrityError,
     load_benchmark_asset_identity,
@@ -219,6 +220,29 @@ def materialize_xanes(
     except FileExistsError as error:
         raise AgentRequestError(str(error)) from error
     except (SourceIntegrityError, TypeError, ValueError, ValidationError) as error:
+        raise AgentRequestError(str(error)) from error
+    except OSError as error:
+        raise AgentExecutionError(str(error)) from error
+    return ServiceResponse(result=result.to_dict())
+
+
+def materialize_cu_cha_profile(
+    *,
+    source_root: Path,
+    source_declaration_file: Path,
+    output_directory: Path,
+) -> ServiceResponse:
+    """Materialize the Cu-CHA operando profile into three fixed dose tracks."""
+
+    try:
+        result = materialize_cu_cha(
+            source_root=source_root,
+            source_declaration_file=source_declaration_file,
+            output_directory=output_directory,
+        )
+    except FileExistsError as error:
+        raise AgentRequestError(str(error)) from error
+    except (TypeError, ValueError) as error:
         raise AgentRequestError(str(error)) from error
     except OSError as error:
         raise AgentExecutionError(str(error)) from error

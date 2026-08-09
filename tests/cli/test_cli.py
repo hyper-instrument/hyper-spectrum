@@ -170,6 +170,58 @@ def test_data_materialize_xanes_spec_forwards_only_declared_inputs(
     ]
 
 
+def test_data_materialize_cu_cha_forwards_only_declared_inputs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source_root = tmp_path / "source"
+    source_declaration = tmp_path / "source-declaration.json"
+    output_directory = tmp_path / "bundle"
+    calls: list[dict[str, object]] = []
+
+    def fake_materialize(**kwargs: object) -> ServiceResponse:
+        calls.append(kwargs)
+        return payload(
+            {
+                "schema_version": "hyperspectrum-cu-cha-materialization-result/v2",
+                "track_count": 3,
+            }
+        )
+
+    monkeypatch.setattr(cli.services, "materialize_cu_cha_profile", fake_materialize)
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "data",
+            "materialize-cu-cha",
+            "--source-root",
+            str(source_root),
+            "--source-declaration-file",
+            str(source_declaration),
+            "--output-directory",
+            str(output_directory),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert_envelope(
+        result,
+        ok=True,
+        expected_result={
+            "schema_version": "hyperspectrum-cu-cha-materialization-result/v2",
+            "track_count": 3,
+        },
+    )
+    assert calls == [
+        {
+            "source_root": source_root,
+            "source_declaration_file": source_declaration,
+            "output_directory": output_directory,
+        }
+    ]
+
+
 def test_task_recommend_forwards_candidate_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
