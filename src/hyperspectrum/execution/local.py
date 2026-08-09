@@ -39,7 +39,16 @@ from .plan import (
     resolve_local_entrypoint,
 )
 
-ToolCallable = Callable[..., tuple[object, ...]]
+ToolCallable = Callable[..., Sequence[object]]
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedMountedWeight:
+    """Exact immutable checkpoint bytes verified against one tool manifest."""
+
+    payload: bytes
+    size_bytes: int
+    sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,13 +107,17 @@ def execute_local_run(
         selected,
         require_canonical_benchmark=not isinstance(plan, RunPlanV2),
     )
-    resolved_entrypoint = _verify_tool_identity(plan, tool, weight_files)
+    resolved_entrypoint, verified_weight = _verify_tool_identity(
+        plan, tool, weight_files
+    )
     resolved_tool = _load_tool_callable(resolved_entrypoint, tool.id)
     try:
         spectra = _load_selected_spectra(
             inference_source, selected, resolved_tool.spectrum_type
         )
-        results = resolved_tool.runner(spectra, **_tool_kwargs(plan, weight_files))
+        results = resolved_tool.runner(
+            spectra, **_tool_kwargs(plan, verified_weight)
+        )
         _validate_results(selected, results, resolved_tool)
 
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -148,7 +161,7 @@ def _verify_tool_identity(
     plan: RunPlanType,
     tool: ToolManifest,
     weight_files: Sequence[Path],
-) -> ResolvedEntrypoint:
+) -> tuple[ResolvedEntrypoint, _VerifiedMountedWeight | None]:
     entrypoints = {
         "savgol": "hyperspectrum.plugins.xas.baselines:savgol_filter",
         "xasdenoise": "hyperspectrum.adapters.xasdenoise:denoise_spectra",
@@ -162,11 +175,13 @@ def _verify_tool_identity(
     if tool.weights.required:
         if len(weight_files) != 1:
             raise ValueError("weighted tools require exactly one mounted weight asset")
-        _verify_mounted_weight(weight_files[0], tool)
+        verified_weight = _verify_mounted_weight(weight_files[0], tool)
         if plan.weight_digest != tool.weights.digest:
             raise ValueError("weight digest does not match the immutable plan")
     elif weight_files or plan.weight_digest != "none":
         raise ValueError("unweighted tools do not accept mounted weight assets")
+    else:
+        verified_weight = None
     resolved = resolve_local_entrypoint(tool)
     if resolved.implementation_digest != plan.implementation_digest:
         raise ValueError("implementation digest does not match the immutable plan")
@@ -179,31 +194,32 @@ def _verify_tool_identity(
     )
     if plan.model_digest != expected_model_digest:
         raise ValueError("model digest does not match the selected implementation")
-    return resolved
+    return resolved, verified_weight
 
 
-def _verify_mounted_weight(path: Path, tool: ToolManifest) -> None:
+def _verify_mounted_weight(path: Path, tool: ToolManifest) -> _VerifiedMountedWeight:
     expected_size = tool.weights.size_bytes
     expected_digest = tool.weights.digest
     if expected_size is None or expected_digest is None:
         raise ValueError("weighted tool manifest has incomplete asset identity")
     try:
-        observed_size = path.stat().st_size
+        with path.open("rb") as stream:
+            payload = stream.read()
     except OSError as error:
-        raise ValueError(f"cannot stat mounted weight asset: {error}") from error
+        raise ValueError(f"cannot read mounted weight asset: {error}") from error
+    observed_size = len(payload)
     if observed_size != expected_size:
         raise ValueError(
             f"mounted weight size mismatch: expected {expected_size}, got {observed_size}"
         )
-    hasher = sha256()
-    try:
-        with path.open("rb") as stream:
-            while chunk := stream.read(1024 * 1024):
-                hasher.update(chunk)
-    except OSError as error:
-        raise ValueError(f"cannot read mounted weight asset: {error}") from error
-    if hasher.hexdigest() != expected_digest:
+    observed_digest = sha256(payload).hexdigest()
+    if observed_digest != expected_digest:
         raise ValueError("mounted weight SHA-256 mismatch")
+    return _VerifiedMountedWeight(
+        payload=payload,
+        size_bytes=observed_size,
+        sha256=observed_digest,
+    )
 
 
 def _load_tool_callable(resolved: ResolvedEntrypoint, tool_id: str) -> _ResolvedTool:
@@ -454,15 +470,17 @@ def _savgol_parameters(plan: RunPlanType) -> tuple[int, int]:
     return window_length, polyorder
 
 
-def _tool_kwargs(plan: RunPlanType, weight_files: Sequence[Path]) -> dict[str, object]:
+def _tool_kwargs(
+    plan: RunPlanType, verified_weight: _VerifiedMountedWeight | None
+) -> dict[str, object]:
     if plan.tool_id == "savgol":
         window_length, polyorder = _savgol_parameters(plan)
         return {"window_length": window_length, "polyorder": polyorder}
     if plan.tool_id == "xasdenoise":
-        if len(weight_files) != 1:
+        if verified_weight is None:
             raise ValueError("XASDenoise requires exactly one mounted weight asset")
         return {
-            "weights_path": weight_files[0],
+            "weight_bytes": verified_weight.payload,
             "device": plan.parameters["device"],
         }
     raise ValueError("unsupported local tool")
@@ -518,7 +536,16 @@ def _write_run(
             )
     _fsync_directory(arrays_directory)
 
-    run_id = f"run-{plan.plan_digest}"
+    model_runtime = _model_runtime_provenance(plan, results, resolved_tool)
+    if plan.tool_id == "xasdenoise":
+        runtime_digest = cast(str, model_runtime["runtime_digest"])
+        execution_digest = canonical_digest(
+            {"plan_digest": plan.plan_digest, "runtime_digest": runtime_digest}
+        )
+        run_id = f"run-{execution_digest}"
+        model_runtime["execution_digest"] = execution_digest
+    else:
+        run_id = f"run-{plan.plan_digest}"
     common_provenance = {
         "model_digest": plan.model_digest,
         "tool_digest": plan.tool_digest,
@@ -533,7 +560,6 @@ def _write_run(
         "data_origin": plan.data_origin,
         "parameters": plan.model_dump(mode="json")["parameters"],
     }
-    model_runtime = _model_runtime_provenance(plan, results, resolved_tool)
     common_provenance.update(model_runtime)
     if isinstance(plan, RunPlanV2):
         bundle: PredictionBundleV2 | PredictionBundleV3 = (
@@ -623,39 +649,57 @@ def _model_runtime_provenance(
         }
         for prediction in predictions
     ]
+    runtime_identity = getattr(results, "runtime_identity", None)
+    if runtime_identity is None:
+        raise RuntimeError("XASDenoise batch omitted resolved runtime identity")
+    to_dict = getattr(runtime_identity, "to_dict", None)
+    runtime_digest = getattr(runtime_identity, "digest", None)
+    if not callable(to_dict) or not isinstance(runtime_digest, str):
+        raise TypeError("XASDenoise batch runtime identity is invalid")
+    runtime = to_dict()
+    if not isinstance(runtime, dict):
+        raise TypeError(
+            "XASDenoise batch runtime identity must serialize to an object"
+        )
+    observed_runtime_digest = canonical_digest(runtime)
+    if runtime_digest != observed_runtime_digest:
+        raise RuntimeError("XASDenoise runtime digest does not match its metadata")
+    runtime_digest = observed_runtime_digest
+    requested_device = runtime.get("requested_device")
+    resolved_device = runtime.get("resolved_device")
+    if requested_device != plan.parameters["device"]:
+        raise RuntimeError("XASDenoise runtime requested device disagrees with the plan")
+    if not isinstance(resolved_device, str) or resolved_device == "auto":
+        raise RuntimeError("XASDenoise runtime must name an actual resolved device")
+    if runtime.get("loaded_weight_sha256") != plan.weight_digest:
+        raise RuntimeError("XASDenoise loaded bytes disagree with the planned weight")
     observed_devices = {prediction.device for prediction in predictions}
-    if len(observed_devices) > 1:
+    if observed_devices and observed_devices != {resolved_device}:
         raise RuntimeError("XASDenoise results disagree on the execution device")
-    actual_device = (
-        next(iter(observed_devices))
-        if observed_devices
-        else str(plan.parameters["device"])
-    )
-    torch_versions = {
+    observed_torch_versions = {
         prediction.torch_version
         for prediction in predictions
         if prediction.torch_version is not None
     }
-    if len(torch_versions) > 1:
+    if observed_torch_versions and observed_torch_versions != {
+        runtime.get("torch_version")
+    }:
         raise RuntimeError("XASDenoise results disagree on the PyTorch version")
     preprocessing = {
         "schema_version": "hyperspectrum-xasdenoise-step-baseline/v1",
         "method": "symmetric_tanh_step",
         "inverse": "add_same_fitted_baseline",
-        "normalization_method": "identity_raw",
+        "normalization_method": "upstream_pre_edge_post_edge_normalized",
         "model_normalization_method": None,
         "native_output_semantics": (
-            "model residual plus the exact fitted baseline in the input signal unit"
+            "model residual plus the exact fitted baseline in upstream-normalized absorption units"
         ),
         "states": states,
     }
     return {
         "preprocessing": preprocessing,
-        "runtime": {
-            "requested_device": plan.parameters["device"],
-            "device": actual_device,
-            **({"torch_version": next(iter(torch_versions))} if torch_versions else {}),
-        },
+        "runtime": runtime,
+        "runtime_digest": runtime_digest,
     }
 
 

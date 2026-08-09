@@ -12,7 +12,10 @@ import numpy as np
 import pytest
 
 from hyperspectrum.adapters.xasdenoise import (
+    XASDenoiseBatchResult,
+    XASDenoiseFailure,
     XASDenoisePrediction,
+    XASDenoiseRuntimeIdentity,
     preprocess_step_baseline,
 )
 from hyperspectrum.contracts import PredictionBundleV2, PredictionBundleV3
@@ -188,6 +191,7 @@ def test_local_savgol_smoke_publishes_a_complete_prediction_bundle_without_scori
     )
     bundle = PredictionBundleV3.model_validate(predictions_data)
     assert bundle.schema_version == "hyperspectrum-prediction/v3"
+    assert bundle.run_id == f"run-{run_plan.plan_digest}"
     assert bundle.provenance["plan_schema_version"] == "hyperspectrum-run-plan/v3"
     run_data = json.loads((run_plan.output_directory / "run.json").read_text())
     assert returned == bundle
@@ -290,19 +294,31 @@ def test_local_xasdenoise_uses_one_mounted_asset_and_records_preprocessing(
     )
 
     def fake_runner(
-        spectra: tuple[object, ...], *, weights_path: Path, device: str
-    ) -> tuple[XASDenoisePrediction, ...]:
-        assert weights_path == tmp_path / "mounted.pth"
+        spectra: tuple[object, ...], *, weight_bytes: bytes, device: str
+    ) -> XASDenoiseBatchResult:
+        assert weight_bytes == payload
         assert device == "auto"
-        return tuple(
-            XASDenoisePrediction(
-                spectrum=item,  # type: ignore[arg-type]
-                method="xasdenoise",
-                optimization_kind="no_training",
-                preprocessing_state=preprocessing_state,
-                device="cpu",
+        return XASDenoiseBatchResult(
+            results=tuple(
+                XASDenoisePrediction(
+                    spectrum=item,  # type: ignore[arg-type]
+                    method="xasdenoise",
+                    optimization_kind="no_training",
+                    preprocessing_state=preprocessing_state,
+                    device="cpu",
+                )
+                for item in spectra
+            ),
+            runtime_identity=XASDenoiseRuntimeIdentity(
+                schema_version="hyperspectrum-xasdenoise-runtime/v1",
+                requested_device="auto",
+                resolved_device="cpu",
+                backend="cpu",
+                torch_version="2.8.0",
+                cuda_version=None,
+                cudnn_version=None,
+                loaded_weight_sha256=sha256(payload).hexdigest(),
             )
-            for item in spectra
         )
 
     monkeypatch.setattr(
@@ -332,13 +348,134 @@ def test_local_xasdenoise_uses_one_mounted_asset_and_records_preprocessing(
     assert preprocessing["schema_version"] == (  # type: ignore[index]
         "hyperspectrum-xasdenoise-step-baseline/v1"
     )
-    assert preprocessing["normalization_method"] == "identity_raw"  # type: ignore[index]
+    assert preprocessing["normalization_method"] != "identity_raw"  # type: ignore[index]
     assert [state["sample_id"] for state in preprocessing["states"]] == [  # type: ignore[index]
         "feo-1",
         "feo-2",
     ]
     assert bundle.provenance["runtime"]["device"] == "cpu"  # type: ignore[index]
+    runtime = bundle.provenance["runtime"]
+    assert runtime["backend"] == "cpu"  # type: ignore[index]
+    assert runtime["torch_version"] == "2.8.0"  # type: ignore[index]
+    assert runtime["loaded_weight_sha256"] == sha256(payload).hexdigest()  # type: ignore[index]
+    assert bundle.run_id != f"run-{run_plan.plan_digest}"
+    assert bundle.provenance["execution_digest"] == bundle.run_id.removeprefix(  # type: ignore[index]
+        "run-"
+    )
     assert_no_scoring_fields(bundle.model_dump(mode="json"))
+
+
+def test_xas_runtime_identity_distinguishes_cpu_cuda_and_auto_resolution() -> None:
+    digest = "a" * 64
+
+    def runtime(requested: str, resolved: str) -> XASDenoiseRuntimeIdentity:
+        backend = "cuda" if resolved.startswith("cuda") else "cpu"
+        return XASDenoiseRuntimeIdentity(
+            schema_version="hyperspectrum-xasdenoise-runtime/v1",
+            requested_device=requested,
+            resolved_device=resolved,
+            backend=backend,  # type: ignore[arg-type]
+            torch_version="2.8.0",
+            cuda_version="12.8" if backend == "cuda" else None,
+            cudnn_version="91002" if backend == "cuda" else None,
+            loaded_weight_sha256=digest,
+        )
+
+    explicit_cpu = runtime("cpu", "cpu")
+    auto_cpu = runtime("auto", "cpu")
+    auto_cuda = runtime("auto", "cuda:0")
+
+    assert len({explicit_cpu.digest, auto_cpu.digest, auto_cuda.digest}) == 3
+    assert auto_cpu.to_dict()["resolved_device"] == "cpu"
+    assert auto_cuda.to_dict()["resolved_device"] == "cuda:0"
+
+
+def test_all_failure_xas_run_retains_batch_runtime_and_never_records_auto(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = b"all-failure-test-state"
+    weights_path = tmp_path / "mounted.pth"
+    weights_path.write_bytes(payload)
+    raw_tool = xasdenoise().model_dump(mode="json", exclude_none=True)
+    raw_tool["weights"] = {
+        "required": True,
+        "state": "present",
+        "allow_download": False,
+        "digest": sha256(payload).hexdigest(),
+        "asset_id": "test-only-asset",
+        "source_url": "https://example.invalid/model.pth",
+        "filename": "model.pth",
+        "size_bytes": len(payload),
+        "license": "test-only",
+    }
+    tool = ToolManifest.model_validate(raw_tool)
+    source = canonical_benchmark_source(tmp_path / "benchmark-input.npz")
+    run_plan = plan(
+        tmp_path,
+        dataset=dataset_for_source(source),
+        verdict=verdict_for_source(source),
+        selected_sample_ids=fixture_ids(2),
+        tool=tool,
+        availability=ToolAvailability(available=True),
+        resources=ResourceBudget(cpu=4, memory_gb=16, gpu_available=False),
+        parameters=xasdenoise_parameters(),
+    )
+    runtime = XASDenoiseRuntimeIdentity(
+        schema_version="hyperspectrum-xasdenoise-runtime/v1",
+        requested_device="auto",
+        resolved_device="cpu",
+        backend="cpu",
+        torch_version="2.8.0",
+        cuda_version=None,
+        cudnn_version=None,
+        loaded_weight_sha256=sha256(payload).hexdigest(),
+    )
+
+    def fake_runner(
+        spectra: tuple[XASSpectrum, ...], *, weight_bytes: bytes, device: str
+    ) -> XASDenoiseBatchResult:
+        assert weight_bytes == payload
+        assert device == "auto"
+        return XASDenoiseBatchResult(
+            results=tuple(
+                XASDenoiseFailure(
+                    sample_id=item.sample_id,
+                    group_id=item.group_id,
+                    energy=item.energy,
+                    energy_unit="eV",
+                    method="xasdenoise",
+                    error_type="model_failure",
+                    message="synthetic failure",
+                )
+                for item in spectra
+            ),
+            runtime_identity=runtime,
+        )
+
+    monkeypatch.setattr(
+        local,
+        "_load_tool_callable",
+        lambda resolved, tool_id: SimpleNamespace(
+            runner=fake_runner,
+            prediction_type=XASDenoisePrediction,
+            failure_type=XASDenoiseFailure,
+            spectrum_type=XASSpectrum,
+            isolated_module_names=(),
+        ),
+    )
+
+    bundle = execute_local_run(
+        run_plan,
+        tool=tool,
+        selected_sample_ids=fixture_ids(2),
+        source_npz=source,
+        weight_files=(weights_path,),
+    )
+
+    assert bundle.predictions == ()
+    assert len(bundle.failures) == 2
+    assert bundle.provenance["runtime"] == runtime.to_dict()
+    assert bundle.provenance["runtime"]["device"] != "auto"  # type: ignore[index]
 
 
 def test_legacy_v2_plan_still_executes_and_emits_v2_prediction(

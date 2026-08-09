@@ -90,7 +90,9 @@ def test_run_skill_enforces_dry_run_leakage_overwrite_and_authority_gates() -> N
         "zenodo-17434349",
         "cc-by-4.0 weights",
         "--weight-file model.pth",
-        "identity_raw",
+        "input_contract_unverified",
+        "upstream pre/post-edge normalization",
+        "must not plan or execute xasdenoise",
         "hyperspectrum-xasdenoise-step-baseline/v1",
         "same `hyperspectrum.adapters.xasdenoise:denoise_spectra` entrypoint",
     ):

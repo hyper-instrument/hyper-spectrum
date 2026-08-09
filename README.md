@@ -37,7 +37,7 @@ The detailed contract is documented in
 
 ### Official XASDenoise adapter
 
-The production adapter pins upstream XASDenoise commit
+The adapter implementation pins upstream XASDenoise commit
 `bda749ee956f9e02acc6995f238d759682ee2ca8` (MIT) and the CC-BY-4.0 Zenodo
 17434349 checkpoint
 `xas_denoiser_model_noise2noise_nonuniformly_sampled_notnormalized.pth`
@@ -46,14 +46,15 @@ The production adapter pins upstream XASDenoise commit
 HyperSpectrum never downloads it. Supply the already authorized, mounted file to
 both planning and execution with one `--weight-file PATH` option.
 
-The checkpoint declares `normalization_method: null`; the canonical adapter
-therefore records `identity_raw` and never range-scales each spectrum. It applies
-the upstream symmetric-tanh step baseline before inference, adds that exact
-fitted baseline afterward, and records the versioned fit state and native-output
-semantics per sample. PyTorch is imported only when XASDenoise is constructed.
-The same `denoise_spectra` entrypoint is used on CPU, CUDA, OCI, and Bohr; those
-backends differ only in how the exact plan, benchmark, code, and weight asset are
-staged.
+The checkpoint's `normalization_method: null` disables only model-internal
+scaling. The pinned Zenodo training/test spectra were already normalized with
+per-spectrum pre-edge/post-edge fits before the symmetric-tanh step was removed.
+The raw benchmark does not retain the upstream E0 values, fit windows, fitted
+curves, or an exact native-unit inverse. XASDenoise therefore remains
+fail-closed with `input_contract_unverified`, even when the mounted checkpoint
+bytes pass verification. Do not plan or execute it on raw `ketek/i0` ratios.
+The `denoise_spectra` entrypoint and runtime-identity contract are retained for
+future inputs that carry the evidenced upstream normalization state.
 
 ## Agent CLI
 

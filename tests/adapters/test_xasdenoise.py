@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 
@@ -10,12 +12,14 @@ import pytest
 from hyperspectrum.adapters import xasdenoise as adapter_module
 from hyperspectrum.adapters.xasdenoise import (
     XASDENOISE_CODE_LICENSE,
+    XASDENOISE_REQUIRED_NORMALIZATION,
     XASDENOISE_SOURCE_COMMIT,
     XASDENOISE_WEIGHT,
     VerifiedWeightAsset,
     WeightAssetContract,
     XASDenoiseAdapter,
     XASDenoisePrediction,
+    XASDenoiseRuntimeIdentity,
     _TorchRuntime,
     denoise_spectra,
     load_state_dict_safely,
@@ -83,22 +87,98 @@ def test_weight_verification_checks_size_and_digest_before_loading(
 def test_safe_loader_requires_weights_only_and_cpu_map_location(tmp_path: Path) -> None:
     # Break caught: a checkpoint could execute pickle payloads or allocate onto a GPU
     # before its state dictionary has been validated.
+    payload = b"test"
     path = tmp_path / "state.pth"
-    path.write_bytes(b"test")
-    calls: list[tuple[Path, str, bool]] = []
+    path.write_bytes(payload)
+    contract = WeightAssetContract(
+        asset_id="test",
+        source_url="https://example.invalid/state.pth",
+        filename="state.pth",
+        size_bytes=len(payload),
+        sha256=sha256(payload).hexdigest(),
+        license="test-only",
+    )
+    verified = verify_weight_asset(path, contract=contract)
+    calls: list[tuple[bytes, str, bool]] = []
 
     class FakeTorch:
         @staticmethod
         def load(
-            supplied: Path, *, map_location: str, weights_only: bool
+            supplied: io.BytesIO, *, map_location: str, weights_only: bool
         ) -> dict[str, object]:
-            calls.append((supplied, map_location, weights_only))
+            calls.append((supplied.getvalue(), map_location, weights_only))
             return {"encoder.0.weight": object()}
 
-    state = load_state_dict_safely(path, torch_module=FakeTorch())
+    state = load_state_dict_safely(verified, torch_module=FakeTorch())
 
     assert tuple(state) == ("encoder.0.weight",)
-    assert calls == [(path, "cpu", True)]
+    assert calls == [(payload, "cpu", True)]
+
+
+def test_safe_loader_uses_exact_verified_bytes_after_path_swap(tmp_path: Path) -> None:
+    # Break caught: replacing a verified pathname between hashing and torch.load
+    # could deserialize different bytes under the verified checkpoint identity.
+    original = b"verified-checkpoint"
+    replacement = b"swapped-checkpoint!"
+    assert len(original) == len(replacement)
+    path = tmp_path / "model.pth"
+    path.write_bytes(original)
+    contract = WeightAssetContract(
+        asset_id="test",
+        source_url="https://example.invalid/model.pth",
+        filename="model.pth",
+        size_bytes=len(original),
+        sha256=sha256(original).hexdigest(),
+        license="test-only",
+    )
+    verified = verify_weight_asset(path, contract=contract)
+    path.write_bytes(replacement)
+    loaded_bytes: list[bytes] = []
+
+    class FakeTorch:
+        @staticmethod
+        def load(
+            supplied: io.BytesIO, *, map_location: str, weights_only: bool
+        ) -> dict[str, object]:
+            assert map_location == "cpu"
+            assert weights_only is True
+            loaded_bytes.append(supplied.getvalue())
+            return {"encoder.0.weight": object()}
+
+    load_state_dict_safely(verified, torch_module=FakeTorch())
+
+    assert verified.payload == original
+    assert verified.sha256 == sha256(original).hexdigest()
+    assert loaded_bytes == [original]
+
+
+def test_safe_loader_rechecks_loaded_byte_digest_before_torch() -> None:
+    # Break caught: a forged or incorrectly assembled verified-byte object could
+    # record one digest while torch deserializes another immutable payload.
+    payload = b"expected"
+    contract = WeightAssetContract(
+        asset_id="test",
+        source_url="https://example.invalid/model.pth",
+        filename="model.pth",
+        size_bytes=len(payload),
+        sha256=sha256(payload).hexdigest(),
+        license="test-only",
+    )
+    forged = VerifiedWeightAsset(
+        path=None,
+        payload=b"tampered",
+        size_bytes=len(payload),
+        sha256=contract.sha256,
+        contract=contract,
+    )
+
+    class FakeTorch:
+        @staticmethod
+        def load(*args: object, **kwargs: object) -> object:
+            raise AssertionError("torch.load must not see mismatched loaded bytes")
+
+    with pytest.raises(ValueError, match="loaded weight bytes"):
+        load_state_dict_safely(forged, torch_module=FakeTorch())
 
 
 def test_torch_runtime_is_strict_eval_inference_only_and_immutable(
@@ -182,8 +262,12 @@ def test_torch_runtime_is_strict_eval_inference_only_and_immutable(
         cuda = Cuda()
 
         @staticmethod
-        def load(path: Path, *, map_location: str, weights_only: bool) -> object:
-            events.append(("torch-load", path, map_location, weights_only))
+        def load(
+            stream: io.BytesIO, *, map_location: str, weights_only: bool
+        ) -> object:
+            events.append(
+                ("torch-load", stream.getvalue(), map_location, weights_only)
+            )
             return {"weight": object()}
 
         @staticmethod
@@ -212,14 +296,14 @@ def test_torch_runtime_is_strict_eval_inference_only_and_immutable(
         sha256=sha256(b"verified").hexdigest(),
         license="test-only",
     )
-    verified = VerifiedWeightAsset(path, 8, contract.sha256, contract)
+    verified = VerifiedWeightAsset(path, b"verified", 8, contract.sha256, contract)
 
     runtime = _TorchRuntime(verified, device="auto")
     values = np.linspace(0.0, 1.0, 33)
     predicted = runtime.predict(values)
 
     np.testing.assert_allclose(predicted, values.astype(np.float32))
-    assert ("torch-load", path, "cpu", True) in events
+    assert ("torch-load", b"verified", "cpu", True) in events
     assert any(
         isinstance(event, tuple)
         and len(event) == 3
@@ -232,6 +316,16 @@ def test_torch_runtime_is_strict_eval_inference_only_and_immutable(
     assert events.count("inference-enter") == events.count("inference-exit") == 1
     assert runtime.device_name == "cpu"
     assert runtime.version == "test-torch"
+    assert runtime.runtime_identity == XASDenoiseRuntimeIdentity(
+        schema_version="hyperspectrum-xasdenoise-runtime/v1",
+        requested_device="auto",
+        resolved_device="cpu",
+        backend="cpu",
+        torch_version="test-torch",
+        cuda_version=None,
+        cudnn_version=None,
+        loaded_weight_sha256=contract.sha256,
+    )
 
     model.output_mode = "mutate"
     with pytest.raises(RuntimeError, match="parameters changed"):
@@ -278,9 +372,9 @@ def test_step_baseline_state_is_versioned_recorded_and_exactly_reversible() -> N
     assert state.edge_strategy == "maximum_first_derivative"
     assert state.inverse == "add_same_fitted_baseline"
     assert state.model_normalization_method is None
-    assert state.normalization_method == "identity_raw"
+    assert state.normalization_method == XASDENOISE_REQUIRED_NORMALIZATION
     assert state.native_output_semantics == (
-        "model residual plus the exact fitted baseline in the input signal unit"
+        "model residual plus the exact fitted baseline in upstream-normalized absorption units"
     )
     assert (
         state.baseline_sha256
@@ -316,9 +410,12 @@ def canonical_input(*, increasing: bool = True) -> CanonicalDenoisingInput:
     return CanonicalDenoisingInput.from_normalized(normalize(sample, "identity_raw"))
 
 
-def test_adapter_capabilities_require_explicit_raw_identity_state() -> None:
-    assert XASDenoiseAdapter.capabilities.required_normalization == "identity_raw"
-    assert XASDenoiseAdapter.capabilities.native_unit_recovery is True
+def test_adapter_capabilities_require_evidenced_upstream_normalization() -> None:
+    assert (
+        XASDenoiseAdapter.capabilities.required_normalization
+        == XASDENOISE_REQUIRED_NORMALIZATION
+    )
+    assert XASDenoiseAdapter.capabilities.native_unit_recovery is False
     assert (
         XASDenoiseAdapter.capabilities.check_sample(
             SpectrumSample(
@@ -340,10 +437,23 @@ def test_adapter_capabilities_require_explicit_raw_identity_state() -> None:
                 metadata={},
                 provenance={},
             ),
-            normalization_method="per_spectrum_range",
+            normalization_method="identity_raw",
         )[0].code
         == "normalization"
     )
+
+
+def test_scientific_gate_rejects_raw_but_accepts_explicit_normalized_contract() -> None:
+    # Break caught: model normalization_method=None was incorrectly interpreted as
+    # proof that raw ketek/i0 ratios were checkpoint-compatible.
+    raw = canonical_input()
+    with pytest.raises(ValueError, match="input_contract_unverified"):
+        XASDenoiseAdapter.validate_input(raw)
+
+    normalized = replace(
+        raw, normalization_method=XASDENOISE_REQUIRED_NORMALIZATION
+    )
+    XASDenoiseAdapter.validate_input(normalized)
 
 
 def test_adapter_input_contract_rejects_decreasing_energy_before_inference() -> None:
@@ -351,7 +461,7 @@ def test_adapter_input_contract_rejects_decreasing_energy_before_inference() -> 
         XASDenoiseAdapter.validate_input(canonical_input(increasing=False))
 
 
-def test_batch_wrapper_uses_canonical_identity_raw_contract_and_preserves_order(
+def test_batch_wrapper_marks_raw_input_and_preserves_order_for_injected_adapter(
     tmp_path: Path,
 ) -> None:
     # Break caught: a backend-specific wrapper could bypass canonical normalization
@@ -363,6 +473,16 @@ def test_batch_wrapper_uses_canonical_identity_raw_contract_and_preserves_order(
 
     class FakeAdapter:
         device = "cpu"
+        runtime_identity = XASDenoiseRuntimeIdentity(
+            schema_version="hyperspectrum-xasdenoise-runtime/v1",
+            requested_device="auto",
+            resolved_device="cpu",
+            backend="cpu",
+            torch_version="test-torch",
+            cuda_version=None,
+            cudnn_version=None,
+            loaded_weight_sha256="a" * 64,
+        )
 
         def predict(
             self, model_input: CanonicalDenoisingInput

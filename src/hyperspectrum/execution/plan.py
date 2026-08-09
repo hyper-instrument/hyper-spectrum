@@ -351,17 +351,23 @@ def _require_tool_parameters(tool: ToolManifest, parameters: FrozenJsonMapping) 
     if tool.id != "xasdenoise":
         return
     expected_keys = {
-        "normalization_method",
+        "input_contract_status",
+        "required_input_normalization",
         "model_normalization_method",
         "preprocessing",
         "device",
     }
     if set(parameters) != expected_keys:
         raise ValueError(
-            "XASDenoise parameters must declare only normalization, preprocessing, and device"
+            "XASDenoise parameters must declare only its input contract, preprocessing, and device"
         )
-    if parameters["normalization_method"] != "identity_raw":
-        raise ValueError("XASDenoise requires explicit identity_raw normalization")
+    if parameters["input_contract_status"] != "unverified":
+        raise ValueError("XASDenoise raw input contract remains unverified")
+    if (
+        parameters["required_input_normalization"]
+        != "upstream_pre_edge_post_edge_normalized"
+    ):
+        raise ValueError("XASDenoise requires upstream pre/post-edge normalization")
     if parameters["model_normalization_method"] is not None:
         raise ValueError(
             "the official XASDenoise checkpoint declares null normalization"

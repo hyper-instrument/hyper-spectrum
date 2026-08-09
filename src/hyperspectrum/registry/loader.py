@@ -112,6 +112,11 @@ def _safe_default_availability(tool: ToolManifest) -> ToolAvailability:
             reasons.append("weights-required-missing")
         else:
             reasons.append("weights-unverified")
+    if tool.id == "xasdenoise":
+        # The checkpoint training database is already pre/post-edge normalized.
+        # Raw benchmark spectra lack the upstream E0, fit windows, and fitted
+        # curves needed to reproduce and exactly invert that normalization.
+        reasons.append("input_contract_unverified")
     if reasons:
         return ToolAvailability(available=False, reasons=tuple(reasons))
     return ToolAvailability(available=True)

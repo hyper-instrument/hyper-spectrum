@@ -335,7 +335,10 @@ def plan_run(
     parameters: dict[str, object]
     if tool.id == "xasdenoise":
         parameters = {
-            "normalization_method": "identity_raw",
+            "input_contract_status": "unverified",
+            "required_input_normalization": (
+                "upstream_pre_edge_post_edge_normalized"
+            ),
             "model_normalization_method": None,
             "preprocessing": {
                 "schema_version": "hyperspectrum-xasdenoise-step-baseline/v1",
@@ -415,10 +418,10 @@ def _availability_with_mounted_weights(
         for reason in registry_availability.reasons
         if reason not in {"weights-required-missing", "weights-unverified"}
     )
-    if non_weight_reasons:
-        reasons = ", ".join(non_weight_reasons)
-        raise AgentMissingAssetError(f"tool '{tool.id}' is unavailable: {reasons}")
     if not tool.weights.required:
+        if non_weight_reasons:
+            reasons = ", ".join(non_weight_reasons)
+            raise AgentMissingAssetError(f"tool '{tool.id}' is unavailable: {reasons}")
         if weight_files:
             raise AgentRequestError(
                 f"tool '{tool.id}' does not accept mounted weight assets"
@@ -428,6 +431,9 @@ def _availability_with_mounted_weights(
         raise AgentMissingAssetError(
             f"tool '{tool.id}' requires exactly one --weight-file"
         )
+    if non_weight_reasons:
+        reasons = ", ".join(non_weight_reasons)
+        raise AgentMissingAssetError(f"tool '{tool.id}' is unavailable: {reasons}")
     if tool.id != "xasdenoise":
         raise AgentMissingAssetError(
             f"tool '{tool.id}' has no registered weight verifier"

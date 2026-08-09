@@ -364,6 +364,7 @@ AvailabilityReason = Literal[
     "verify-module-unresolvable",
     "weights-required-missing",
     "weights-unverified",
+    "input_contract_unverified",
 ]
 
 

@@ -98,7 +98,8 @@ def xasdenoise() -> ToolManifest:
 
 def xasdenoise_parameters() -> dict[str, object]:
     return {
-        "normalization_method": "identity_raw",
+        "input_contract_status": "unverified",
+        "required_input_normalization": "upstream_pre_edge_post_edge_normalized",
         "model_normalization_method": None,
         "preprocessing": {
             "schema_version": "hyperspectrum-xasdenoise-step-baseline/v1",
@@ -418,9 +419,11 @@ def test_planning_rejects_unverified_mounted_model_weights(
         )
 
 
-def test_verified_xasdenoise_plan_records_exact_model_semantics(tmp_path: Path) -> None:
-    # Break caught: the official null normalization could be silently replaced by
-    # range scaling, or the model-native baseline transform could go unversioned.
+def test_forced_xasdenoise_plan_records_unverified_raw_input_contract(
+    tmp_path: Path,
+) -> None:
+    # Break caught: model normalization_method=None could be relabeled as proof
+    # that raw benchmark ratios match the checkpoint's normalized training data.
     result = plan(
         tmp_path,
         tool=xasdenoise(),
@@ -435,8 +438,8 @@ def test_verified_xasdenoise_plan_records_exact_model_semantics(tmp_path: Path) 
     assert result.parameters == xasdenoise_parameters()
 
     changed = deepcopy(xasdenoise_parameters())
-    changed["normalization_method"] = "per_spectrum_range"
-    with pytest.raises(ValueError, match="identity_raw"):
+    changed["input_contract_status"] = "verified"
+    with pytest.raises(ValueError, match="remains unverified"):
         plan(
             tmp_path,
             tool=xasdenoise(),

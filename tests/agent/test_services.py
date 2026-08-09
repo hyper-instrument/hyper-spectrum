@@ -356,6 +356,7 @@ def test_tool_matching_reports_selected_and_blocked_evidence() -> None:
     blocked = {item["id"]: item for item in result["blocked"]}  # type: ignore[index]
     xasdenoise = blocked["xasdenoise"]
     assert "weights-unverified" in xasdenoise["reasons"]
+    assert "input_contract_unverified" in xasdenoise["reasons"]
     assert xasdenoise["manifest"]["source"]["commit"] == (
         "bda749ee956f9e02acc6995f238d759682ee2ca8"
     )
@@ -398,7 +399,7 @@ def test_tool_matching_delegates_positive_selection_to_registry_contract(
     assert response.result["matches"][0]["id"] == "savgol"  # type: ignore[index]
 
 
-def test_mounted_xas_weight_is_verified_before_availability(
+def test_mounted_xas_weight_cannot_override_unverified_input_contract(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from hyperspectrum.adapters import xasdenoise as adapter_module
@@ -413,12 +414,14 @@ def test_mounted_xas_weight_is_verified_before_availability(
 
     monkeypatch.setattr(adapter_module, "verify_weight_asset", verified)
 
-    availability = agent._availability_with_mounted_weights(
-        agent._load_tool("xasdenoise"), (weight,)
-    )
+    with pytest.raises(
+        agent.AgentMissingAssetError, match="input_contract_unverified"
+    ):
+        agent._availability_with_mounted_weights(
+            agent._load_tool("xasdenoise"), (weight,)
+        )
 
-    assert availability.available is True
-    assert observed == [weight]
+    assert observed == []
 
 
 def test_xas_availability_requires_exactly_one_mounted_weight(tmp_path: Path) -> None:

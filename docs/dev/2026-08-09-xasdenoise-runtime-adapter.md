@@ -1,7 +1,8 @@
 # XASDenoise runtime adapter evidence
 
-This increment replaces the former unknown-license/missing-weight placeholder
-with a thin production adapter. It does not vendor or download checkpoint bytes.
+This increment pins and verifies a thin adapter, but production use on the raw
+benchmark remains blocked by an unverified scientific input contract. It does
+not vendor or download checkpoint bytes.
 
 ## Pinned identities
 
@@ -18,42 +19,50 @@ with a thin production adapter. It does not vendor or download checkpoint bytes.
   size nine, bias disabled, 16-point reflect padding/crop, nonuniformly sampled
   noise-to-noise checkpoint, and checkpoint normalization method null.
 
-The registry contains those exact identities and an HTTPS source locator, but
-availability remains fail-closed until the caller supplies exactly one local
-file whose size and SHA-256 match. The runtime never downloads a replacement and
-never falls back to random initialization.
+The registry contains those exact identities and an HTTPS source locator. A
+matching local checkpoint resolves only the weight gate; it cannot resolve the
+independent `input_contract_unverified` gate. The runtime never downloads a
+replacement and never falls back to random initialization.
 
 ## Scientific and runtime semantics
 
-Canonical normalization is explicitly `identity_raw`; no per-spectrum range
-normalization is applied. Before model inference, the adapter reproduces the
-upstream symmetric-tanh step-baseline fit using the maximum first derivative as
-the edge guess and five percent of the energy span as the width guess. After
-inference it adds the exact same fitted baseline. Each prediction records the
-versioned fit parameters, baseline digest, inverse operation, null checkpoint
-normalization, canonical normalization, and native-output semantics.
+Pinned upstream and Zenodo evidence shows the checkpoint consumes spectra that
+were already normalized using spectrum-specific pre-edge and post-edge fits.
+Only then does the upstream pipeline fit and subtract its symmetric-tanh step.
+The Zenodo HDF5 metadata marks spectra normalized and carries differing E0,
+pre/post windows, and V/V fit metadata per spectrum. The raw HyperSpectrum
+benchmark carries none of those fitted states. Consequently
+`normalization_method=None` is not evidence for raw compatibility, and the
+adapter rejects `identity_raw` with `input_contract_unverified`. Its step fit is
+available only for inputs explicitly marked
+`upstream_pre_edge_post_edge_normalized`; restoration returns those normalized
+absorption units and does not claim raw native-unit recovery.
 
-Checkpoint loading uses `torch.load(..., map_location="cpu", weights_only=True)`
-after byte verification. State loading is strict. The model enters evaluation
-mode and runs under `torch.inference_mode()`. Input axis order, shape, finite
+Checkpoint loading uses `torch.load(io.BytesIO(verified_bytes),
+map_location="cpu", weights_only=True)`. The same immutable bytes are hashed and
+loaded, eliminating pathname swaps. State loading is strict. The model enters
+evaluation mode and runs under `torch.inference_mode()`. Input axis order, shape, finite
 values, output shape/finite values, and unchanged parameter bytes are checked.
 An explicit CUDA request fails when CUDA is unavailable; only `device=auto` may
 select CPU. PredictionBundle v3 and `run.json` retain the existing model, tool,
 implementation, weight, environment, source-dataset, source-content-manifest,
-benchmark-asset, selection, and plan identities and add requested/actual device,
-PyTorch version, and per-sample preprocessing evidence.
+benchmark-asset, selection, and plan identities. XAS execution IDs additionally
+bind requested and resolved device, CPU/CUDA backend, PyTorch/CUDA/cuDNN
+versions, and the digest of the bytes actually loaded. Batch runtime evidence is
+retained even when every sample fails. Traditional baseline run IDs are unchanged.
 
 ## One adapter across backends
 
-Planning and execution both receive the authorized asset explicitly:
+XASDenoise planning is currently expected to fail closed:
 
 ```bash
 hyperspectrum run plan ... --tool-id xasdenoise --weight-file MODEL.pth --device auto --json
-hyperspectrum run local ... --weight-file MODEL.pth --json
+# unavailable: input_contract_unverified
 ```
 
-Local CPU/GPU execution calls
-`hyperspectrum.adapters.xasdenoise:denoise_spectra`. OCI and Bohr stage the same
+When an evidenced normalized input contract becomes available, local CPU/GPU
+execution calls `hyperspectrum.adapters.xasdenoise:denoise_spectra`. OCI and
+Bohr must stage the same
 immutable benchmark, plan, source closure, and checkpoint and invoke that same
 entrypoint; no backend-specific scientific adapter is permitted. HyperSpectrum
 emits predictions and provenance only. ACE remains responsible for grouped
@@ -62,10 +71,14 @@ metrics, reports, boards, and local/Bohr parity decisions.
 ## Verification status and remaining gate
 
 The deterministic test suite, static checks, source/wheel packaging, installed
-wheel verification command, and installed tool-metadata query pass without real
-weights or benchmark data. A prior read-only 5090 audit established the official
-checkpoint byte identity and exercised the upstream architecture only. It was
-not an end-to-end smoke of this adapter. The required adapter E2E CUDA smoke was
-attempted twice on 2026-08-09, but SSH failed before authentication with `No
-route to host`. Therefore local-5090, OCI, and Bohr result/parity evidence remain
-explicitly unverified gates; no runtime-success or model-quality claim is made.
+wheel verification command, and installed tool-metadata query exercise the
+fail-closed contract without real inference. A prior read-only 5090 audit
+established the official checkpoint byte identity and exercised the upstream
+architecture only. It was not an end-to-end smoke of this adapter. A fresh
+current-source probe on 2026-08-09 confirmed that routing and CUDA were available
+(PyTorch reported CUDA 12.8), but the exact checkpoint was absent from the
+permitted/readable staging roots, the host Python lacked SciPy, and current-source
+transfer was not authorized. No checkpoint was downloaded and the prior smoke
+was not reused as current evidence. Therefore local-5090, OCI, and Bohr
+result/parity evidence remain explicitly unverified gates; no runtime-success or
+model-quality claim is made.

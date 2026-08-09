@@ -69,14 +69,15 @@ Ground truth is readiness and later ACE-evaluation evidence only. Never read cle
 arrays to choose parameters, samples, preprocessing, or outputs. Keep the declared
 SavGol parameters fixed; do not tune, fit, score, rank, or select favorable cases.
 
-For XASDenoise, use `--tool-id xasdenoise --weight-file MODEL.pth` for both the
-dry and executable plans and retain the same option for `run local`. The mounted
-file must match the declared size and SHA-256 before any model module or PyTorch
-checkpoint loader runs. Choose `--device cpu`, `--device cuda:N`, or the explicit
-`--device auto` fallback policy. The checkpoint normalization is null, so require
-canonical `identity_raw`; never substitute per-spectrum range normalization.
-Preserve the recorded `hyperspectrum-xasdenoise-step-baseline/v1` fit and inverse
-state. CPU, local GPU, OCI, and Bohr must all call the same
+XASDenoise is currently blocked with `input_contract_unverified`. Its null model
+normalization does not make raw `ketek/i0` ratios compatible: the pinned training
+database was already processed with upstream pre/post-edge normalization before
+the `hyperspectrum-xasdenoise-step-baseline/v1` transform. The benchmark lacks
+the spectrum-specific E0, fit windows, fitted curves, and native-unit inverse.
+Even when `--weight-file MODEL.pth` matches the declared bytes, you must not plan
+or execute XASDenoise. Report the blocker and continue only with an available
+traditional baseline. If a future benchmark carries the evidenced normalization
+state, all backends must use the same
 `hyperspectrum.adapters.xasdenoise:denoise_spectra` entrypoint.
 
 ## Authorization Gate

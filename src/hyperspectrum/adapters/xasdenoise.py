@@ -10,13 +10,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib
+import io
 import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Literal, TypeAlias, cast
+from typing import Any, Literal, TypeAlias, cast, overload
 
 import numpy as np
 from numpy.typing import NDArray
@@ -42,6 +43,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MODEL_LAYERS = 4
 _MODEL_KERNEL_SIZE = 9
 _MODEL_EDGE_CROP = 16
+XASDENOISE_REQUIRED_NORMALIZATION = "upstream_pre_edge_post_edge_normalized"
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,49 +87,75 @@ XASDENOISE_WEIGHT = WeightAssetContract(
 
 @dataclass(frozen=True, slots=True)
 class VerifiedWeightAsset:
-    """A local file proven to match one exact weight contract."""
+    """Immutable bytes proven to match one exact weight contract."""
 
-    path: Path
+    path: Path | None
+    payload: bytes
     size_bytes: int
     sha256: str
     contract: WeightAssetContract
 
 
-def verify_weight_asset(
-    path: Path, *, contract: WeightAssetContract = XASDENOISE_WEIGHT
+def verify_weight_bytes(
+    payload: bytes,
+    *,
+    contract: WeightAssetContract = XASDENOISE_WEIGHT,
+    source_path: Path | None = None,
 ) -> VerifiedWeightAsset:
-    """Verify checkpoint size and SHA-256 before any torch deserialization."""
+    """Verify immutable checkpoint bytes without consulting a mutable pathname."""
 
-    try:
-        size_bytes = path.stat().st_size
-    except OSError as error:
-        raise ValueError(f"cannot stat weight asset: {error}") from error
+    immutable = bytes(payload)
+    size_bytes = len(immutable)
     if size_bytes != contract.size_bytes:
         raise ValueError(
             f"weight asset size mismatch: expected {contract.size_bytes}, got {size_bytes}"
         )
-    hasher = hashlib.sha256()
-    try:
-        with path.open("rb") as stream:
-            while chunk := stream.read(1024 * 1024):
-                hasher.update(chunk)
-    except OSError as error:
-        raise ValueError(f"cannot read weight asset: {error}") from error
-    digest = hasher.hexdigest()
+    digest = hashlib.sha256(immutable).hexdigest()
     if digest != contract.sha256:
         raise ValueError("weight asset SHA-256 mismatch")
     return VerifiedWeightAsset(
-        path=path,
+        path=source_path,
+        payload=immutable,
         size_bytes=size_bytes,
         sha256=digest,
         contract=contract,
     )
 
 
-def load_state_dict_safely(path: Path, *, torch_module: Any) -> Mapping[str, object]:
-    """Load tensor weights only onto CPU and reject non-state-dict payloads."""
+def verify_weight_asset(
+    path: Path, *, contract: WeightAssetContract = XASDENOISE_WEIGHT
+) -> VerifiedWeightAsset:
+    """Read once, then verify the exact bytes retained for deserialization."""
 
-    loaded = torch_module.load(path, map_location="cpu", weights_only=True)
+    try:
+        with path.open("rb") as stream:
+            payload = stream.read()
+    except OSError as error:
+        raise ValueError(f"cannot read weight asset: {error}") from error
+    return verify_weight_bytes(
+        payload,
+        contract=contract,
+        source_path=path,
+    )
+
+
+def load_state_dict_safely(
+    verified: VerifiedWeightAsset, *, torch_module: Any
+) -> Mapping[str, object]:
+    """Load the exact verified bytes onto CPU and reject unsafe payload shapes."""
+
+    loaded_size = len(verified.payload)
+    loaded_digest = hashlib.sha256(verified.payload).hexdigest()
+    if (
+        loaded_size != verified.size_bytes
+        or loaded_size != verified.contract.size_bytes
+        or loaded_digest != verified.sha256
+        or loaded_digest != verified.contract.sha256
+    ):
+        raise ValueError("loaded weight bytes do not match their verified identity")
+    loaded = torch_module.load(
+        io.BytesIO(verified.payload), map_location="cpu", weights_only=True
+    )
     if not isinstance(loaded, Mapping) or not loaded:
         raise ValueError("checkpoint must contain one non-empty state dictionary")
     if any(not isinstance(key, str) or not key for key in loaded):
@@ -141,7 +169,7 @@ def _canonical_float64_bytes(values: NDArray[np.float64]) -> bytes:
 
 @dataclass(frozen=True, slots=True)
 class XASDenoisePreprocessingState:
-    """Replayable evidence for official step-baseline subtraction/restoration."""
+    """Replayable step subtraction within upstream-normalized absorption units."""
 
     schema_version: Literal["hyperspectrum-xasdenoise-step-baseline/v1"]
     method: Literal["symmetric_tanh_step"]
@@ -150,10 +178,10 @@ class XASDenoisePreprocessingState:
     fit_parameters: tuple[float, float, float]
     baseline_sha256: str
     inverse: Literal["add_same_fitted_baseline"]
-    normalization_method: Literal["identity_raw"]
+    normalization_method: Literal["upstream_pre_edge_post_edge_normalized"]
     model_normalization_method: None
     native_output_semantics: Literal[
-        "model residual plus the exact fitted baseline in the input signal unit"
+        "model residual plus the exact fitted baseline in upstream-normalized absorption units"
     ]
 
     def __post_init__(self) -> None:
@@ -223,7 +251,7 @@ def preprocess_step_baseline(
     energy: NDArray[np.float64] | np.ndarray,
     signal: NDArray[np.float64] | np.ndarray,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], XASDenoisePreprocessingState]:
-    """Subtract the official symmetric-tanh step and persist its exact inverse."""
+    """Subtract the official step from an already normalized XAS spectrum."""
 
     x, y = _validate_energy_signal(energy, signal)
     derivatives = np.diff(y) / np.diff(x)
@@ -264,10 +292,10 @@ def preprocess_step_baseline(
         fit_parameters=parameters,
         baseline_sha256=hashlib.sha256(_canonical_float64_bytes(baseline)).hexdigest(),
         inverse="add_same_fitted_baseline",
-        normalization_method="identity_raw",
+        normalization_method="upstream_pre_edge_post_edge_normalized",
         model_normalization_method=None,
         native_output_semantics=(
-            "model residual plus the exact fitted baseline in the input signal unit"
+            "model residual plus the exact fitted baseline in upstream-normalized absorption units"
         ),
     )
     return transformed, baseline, state
@@ -278,7 +306,7 @@ def restore_step_baseline(
     baseline: NDArray[np.float64] | np.ndarray,
     state: XASDenoisePreprocessingState,
 ) -> NDArray[np.float64]:
-    """Apply the recorded exact inverse and return native-unit numeric values."""
+    """Apply the exact step inverse in upstream-normalized absorption units."""
 
     prediction = np.array(model_output, dtype=np.float64, copy=True)
     stored_baseline = np.array(baseline, dtype=np.float64, copy=True)
@@ -375,6 +403,61 @@ def _parameter_digest(model: Any) -> str:
     return hasher.hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class XASDenoiseRuntimeIdentity:
+    """Batch-level runtime identity bound into every executed XAS run."""
+
+    schema_version: Literal["hyperspectrum-xasdenoise-runtime/v1"]
+    requested_device: str
+    resolved_device: str
+    backend: Literal["cpu", "cuda"]
+    torch_version: str
+    cuda_version: str | None
+    cudnn_version: str | None
+    loaded_weight_sha256: str
+
+    def __post_init__(self) -> None:
+        if re.fullmatch(r"auto|cpu|cuda(?::[0-9]+)?", self.requested_device) is None:
+            raise ValueError("requested_device is invalid")
+        if re.fullmatch(r"cpu|cuda:[0-9]+", self.resolved_device) is None:
+            raise ValueError("resolved_device must name an actual CPU or CUDA device")
+        expected_backend = (
+            "cuda" if self.resolved_device.startswith("cuda:") else "cpu"
+        )
+        if self.backend != expected_backend:
+            raise ValueError("runtime backend does not match the resolved device")
+        if not self.torch_version.strip() or self.torch_version == "unknown":
+            raise ValueError("torch_version must identify the actual Torch runtime")
+        if self.backend == "cuda" and self.cuda_version is None:
+            raise ValueError("CUDA execution requires a CUDA runtime version")
+        if _SHA256.fullmatch(self.loaded_weight_sha256) is None:
+            raise ValueError("loaded_weight_sha256 must be a lowercase SHA-256")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "requested_device": self.requested_device,
+            "device": self.resolved_device,
+            "resolved_device": self.resolved_device,
+            "backend": self.backend,
+            "torch_version": self.torch_version,
+            "cuda_version": self.cuda_version,
+            "cudnn_version": self.cudnn_version,
+            "loaded_weight_sha256": self.loaded_weight_sha256,
+        }
+
+    @property
+    def digest(self) -> str:
+        payload = json.dumps(
+            self.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+
 class _TorchRuntime:
     """Torch boundary isolated from preprocessing and canonical contracts."""
 
@@ -387,8 +470,10 @@ class _TorchRuntime:
             ) from error
         self._torch = torch_module
         self.version = str(getattr(torch_module, "__version__", "unknown"))
+        self.requested_device = device
+        self._loaded_weight_sha256 = verified.sha256
         self.device = self._resolve_device(device)
-        state = load_state_dict_safely(verified.path, torch_module=torch_module)
+        state = load_state_dict_safely(verified, torch_module=torch_module)
         model = _build_official_model(torch_module)
         model.load_state_dict(state, strict=True)
         self._model = model.to(self.device)
@@ -399,6 +484,8 @@ class _TorchRuntime:
     def _resolve_device(self, requested: str) -> Any:
         if requested == "auto":
             name = "cuda:0" if self._torch.cuda.is_available() else "cpu"
+        elif requested == "cuda":
+            name = "cuda:0"
         else:
             name = requested
         device = self._torch.device(name)
@@ -409,6 +496,35 @@ class _TorchRuntime:
     @property
     def device_name(self) -> str:
         return str(self.device)
+
+    @property
+    def runtime_identity(self) -> XASDenoiseRuntimeIdentity:
+        version_namespace = getattr(self._torch, "version", None)
+        cuda_version_value = getattr(version_namespace, "cuda", None)
+        cuda_version = (
+            str(cuda_version_value) if cuda_version_value is not None else None
+        )
+        cudnn = getattr(getattr(self._torch, "backends", None), "cudnn", None)
+        cudnn_version_fn = getattr(cudnn, "version", None)
+        cudnn_version_value = (
+            cudnn_version_fn() if callable(cudnn_version_fn) else None
+        )
+        cudnn_version = (
+            str(cudnn_version_value) if cudnn_version_value is not None else None
+        )
+        backend: Literal["cpu", "cuda"] = (
+            "cuda" if self.device.type == "cuda" else "cpu"
+        )
+        return XASDenoiseRuntimeIdentity(
+            schema_version="hyperspectrum-xasdenoise-runtime/v1",
+            requested_device=self.requested_device,
+            resolved_device=self.device_name,
+            backend=backend,
+            torch_version=self.version,
+            cuda_version=cuda_version,
+            cudnn_version=cudnn_version,
+            loaded_weight_sha256=self._loaded_weight_sha256,
+        )
 
     def predict(self, values: NDArray[np.float64]) -> NDArray[np.float64]:
         before = _parameter_digest(self._model)
@@ -438,12 +554,24 @@ class XASDenoiseAdapter:
         axis_ranks=(1,),
         representations=("dense",),
         channel_counts=(1,),
-        required_normalization="identity_raw",
-        native_unit_recovery=True,
+        required_normalization=XASDENOISE_REQUIRED_NORMALIZATION,
+        native_unit_recovery=False,
     )
 
-    def __init__(self, weights_path: Path, *, device: str = "auto") -> None:
-        verified = verify_weight_asset(weights_path)
+    def __init__(
+        self,
+        weights_path: Path | None = None,
+        *,
+        weight_bytes: bytes | None = None,
+        device: str = "auto",
+    ) -> None:
+        if (weights_path is None) == (weight_bytes is None):
+            raise ValueError("provide exactly one of weights_path or weight_bytes")
+        verified = (
+            verify_weight_asset(weights_path)
+            if weights_path is not None
+            else verify_weight_bytes(cast(bytes, weight_bytes))
+        )
         self._runtime = _TorchRuntime(verified, device=device)
         self._preprocessing_states: dict[str, XASDenoisePreprocessingState] = {}
 
@@ -467,8 +595,12 @@ class XASDenoiseAdapter:
             raise ValueError("XASDenoise requires a strictly increasing energy/eV axis")
         if not np.all(np.diff(model_input.axis_values[0]) > 0.0):
             raise ValueError("XASDenoise energy must be strictly increasing")
-        if model_input.normalization_method != "identity_raw":
-            raise ValueError("XASDenoise requires explicit identity_raw normalization")
+        if model_input.normalization_method != XASDENOISE_REQUIRED_NORMALIZATION:
+            raise ValueError(
+                "input_contract_unverified: the pinned checkpoint requires the "
+                "upstream per-spectrum pre-edge/post-edge normalization state; "
+                "raw ketek/i0 ratios and generic normalization are not compatible"
+            )
         if not np.all(model_input.valid_mask):
             raise ValueError("XASDenoise does not support masked signal values")
         _validate_energy_signal(model_input.axis_values[0], model_input.signal)
@@ -480,6 +612,10 @@ class XASDenoiseAdapter:
     @property
     def torch_version(self) -> str:
         return self._runtime.version
+
+    @property
+    def runtime_identity(self) -> XASDenoiseRuntimeIdentity:
+        return self._runtime.runtime_identity
 
     def preprocessing_state(self, sample_id: str) -> XASDenoisePreprocessingState:
         try:
@@ -493,11 +629,11 @@ class XASDenoiseAdapter:
             model_input.axis_values[0], model_input.signal
         )
         residual = self._runtime.predict(transformed)
-        native = restore_step_baseline(residual, baseline, state)
+        restored_normalized = restore_step_baseline(residual, baseline, state)
         self._preprocessing_states[model_input.sample_id] = state
         return CanonicalDenoisingOutput(
             sample_id=model_input.sample_id,
-            signal=native,
+            signal=restored_normalized,
             valid_mask=model_input.valid_mask,
             normalization_state_digest=model_input.normalization_state_digest,
         )
@@ -505,7 +641,7 @@ class XASDenoiseAdapter:
 
 @dataclass(frozen=True, slots=True)
 class XASDenoisePrediction:
-    """One successful native-unit prediction plus preprocessing evidence."""
+    """One successful prediction plus its normalized-unit preprocessing evidence."""
 
     spectrum: XASSpectrum
     method: Literal["xasdenoise"]
@@ -536,16 +672,41 @@ class XASDenoiseFailure:
 XASDenoiseResult: TypeAlias = XASDenoisePrediction | XASDenoiseFailure
 
 
+@dataclass(frozen=True, slots=True)
+class XASDenoiseBatchResult(Sequence[XASDenoiseResult]):
+    """Ordered outcomes plus runtime identity, including all-failure batches."""
+
+    results: tuple[XASDenoiseResult, ...]
+    runtime_identity: XASDenoiseRuntimeIdentity
+
+    def __len__(self) -> int:
+        return len(self.results)
+
+    @overload
+    def __getitem__(self, index: int) -> XASDenoiseResult: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[XASDenoiseResult, ...]: ...
+
+    def __getitem__(
+        self, index: int | slice
+    ) -> XASDenoiseResult | tuple[XASDenoiseResult, ...]:
+        return self.results[index]
+
+
 def denoise_spectra(
     samples: Sequence[XASSpectrum],
     *,
-    weights_path: Path,
+    weights_path: Path | None = None,
+    weight_bytes: bytes | None = None,
     device: str = "auto",
     _adapter: XASDenoiseAdapter | None = None,
-) -> tuple[XASDenoiseResult, ...]:
+) -> XASDenoiseBatchResult:
     """Run the one official adapter over ordered XAS inputs on any host backend."""
 
-    adapter = _adapter or XASDenoiseAdapter(weights_path, device=device)
+    adapter = _adapter or XASDenoiseAdapter(
+        weights_path, weight_bytes=weight_bytes, device=device
+    )
     results: list[XASDenoiseResult] = []
     for source in samples:
         try:
@@ -608,7 +769,9 @@ def denoise_spectra(
                     message=str(error),
                 )
             )
-    return tuple(results)
+    return XASDenoiseBatchResult(
+        results=tuple(results), runtime_identity=adapter.runtime_identity
+    )
 
 
 def verification_report() -> dict[str, object]:
@@ -619,7 +782,9 @@ def verification_report() -> dict[str, object]:
         "source_commit": XASDENOISE_SOURCE_COMMIT,
         "code_license": XASDENOISE_CODE_LICENSE,
         "checkpoint_normalization_method": None,
-        "normalization_method": "identity_raw",
+        "required_input_normalization": XASDENOISE_REQUIRED_NORMALIZATION,
+        "raw_input_contract_status": "unverified",
+        "availability_reason": "input_contract_unverified",
         "preprocessing_schema_version": ("hyperspectrum-xasdenoise-step-baseline/v1"),
         "weight": {
             "asset_id": XASDENOISE_WEIGHT.asset_id,

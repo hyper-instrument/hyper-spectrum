@@ -386,6 +386,7 @@ def test_local_adapters_resolve_but_external_weight_bytes_remain_unverified() ->
     assert registry.availability(savgol).available is True
     assert "entrypoint-unresolvable" not in registry.availability(xasdenoise).reasons
     assert "weights-unverified" in registry.availability(xasdenoise).reasons
+    assert "input_contract_unverified" in registry.availability(xasdenoise).reasons
 
 
 @pytest.mark.parametrize(
@@ -505,7 +506,10 @@ def test_default_availability_rejects_unprovable_top_level_entrypoint_object(
     availability = ToolRegistry((tool,)).availability(tool)
 
     assert availability.available is False
-    assert availability.reasons == ("entrypoint-unresolvable",)
+    assert availability.reasons == (
+        "entrypoint-unresolvable",
+        "input_contract_unverified",
+    )
 
 
 def test_default_availability_never_probes_host_for_container_tool() -> None:
