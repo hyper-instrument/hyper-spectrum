@@ -151,6 +151,16 @@ request fails when CUDA is unavailable; only `auto` may select CPU.
   local inference NPZ shape, while ACE v3 canonical benchmark planning still
   requires a thin profile-v2 adapter. The code never relabels this proxy as
   physical noiseless ground truth or silently coerces it into the v1 manifest.
+- `hyperspectrum-local-inference-npz/v2` is the candidate-facing half of one
+  track: the scored test rows only. `/v1` carried every split's rows, which
+  handed a candidate container samples it is not asked to answer and whose
+  predictions the scorer must refuse as leakage. The root manifest states the
+  same fact as `execution_boundary.candidate_container_asset:
+  inference_only_test_split`, and both are exact-matched, so a `/v1`
+  materialization cannot be read as a `/v2` one. `execute_ace_xas_inference_only`
+  is the entry point that consumes it — one asset, no target, no split, no
+  profile — and it plans as a v2 run plan precisely because that plan shape has
+  nowhere to record a benchmark identity.
 - Successful M0 evidence must pass `evidence validate`. The packaged semantic
   validator runs JSON Schema first, then structural redaction, locator policy,
   provenance equality, asset mapping, and count-order checks.

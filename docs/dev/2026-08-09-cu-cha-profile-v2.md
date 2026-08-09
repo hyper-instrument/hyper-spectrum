@@ -133,6 +133,16 @@ five fields accepted by HyperSpectrum's reusable local inference boundary:
 energy, noisy signal, sample IDs, group IDs, and energy unit. The public loader
 returns core `DenoisingPair` objects for quantitative evaluation.
 
+> **Superseded in one respect, 2026-08-09.** `inference.npz` carried every
+> admitted spectrum's row when this was written; it now carries the scored test
+> rows only, and two contract strings moved with it
+> (`inference_asset.contract` `/v1` → `/v2`, `candidate_container_asset`
+> `inference_only` → `inference_only_test_split`). The
+> "exact inference/benchmark input equality" the loader checks below is now
+> equality against the benchmark's **test rows**. See
+> `docs/dev/2026-08-09-inference-only-candidate.md` for why, what else moved,
+> and which digests change. Everything else on this page is current.
+
 The materialization result publishes `profile_sha256`, the SHA-256 of the exact
 root `manifest.json` bytes. `load_cu_cha_denoising_pairs` requires that value as
 `expected_profile_sha256` and verifies it before trusting any internal digest.
