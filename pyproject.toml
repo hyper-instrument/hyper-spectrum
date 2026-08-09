@@ -3,6 +3,8 @@ name = "hyperspectrum"
 version = "0.1.0"
 description = "Contracts and runtime for scientific spectroscopy agents"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 dependencies = [
     "pydantic>=2.8,<3",
     "typer>=0.12,<1",

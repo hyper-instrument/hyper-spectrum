@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import sysconfig
+import tarfile
 import zipfile
 from hashlib import sha256
 from pathlib import Path
@@ -107,6 +108,79 @@ def command(
         capture_output=True,
         check=False,
     )
+
+
+def test_distribution_ships_project_and_third_party_license_evidence(
+    tmp_path: Path,
+) -> None:
+    """Catch a public artifact that omits its license or required attributions."""
+    dist = tmp_path / "dist"
+    clean_environment = dict(os.environ)
+    clean_environment.pop("PYTHONPATH", None)
+    clean_environment["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
+    built = command(
+        "uv",
+        "build",
+        "--offline",
+        "--no-cache",
+        "--out-dir",
+        str(dist),
+        env=clean_environment,
+    )
+    assert built.returncode == 0, built.stderr
+
+    wheel = next(dist.glob("hyperspectrum-*.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        wheel_names = set(archive.namelist())
+        metadata_name = next(
+            name for name in wheel_names if name.endswith(".dist-info/METADATA")
+        )
+        metadata = archive.read(metadata_name).decode("utf-8")
+        license_name = next(
+            name for name in wheel_names if name.endswith(".dist-info/licenses/LICENSE")
+        )
+        notices_name = next(
+            name
+            for name in wheel_names
+            if name.endswith(".dist-info/licenses/THIRD_PARTY_NOTICES.md")
+        )
+        project_license_bytes = archive.read(license_name)
+        notices_bytes = archive.read(notices_name)
+        project_license = project_license_bytes.decode("utf-8")
+        notices = notices_bytes.decode("utf-8")
+
+    assert "License-Expression: MIT" in metadata
+    assert "License-File: LICENSE" in metadata
+    assert "License-File: THIRD_PARTY_NOTICES.md" in metadata
+    assert "MIT License" in project_license
+    assert "HyperSpectrum contributors" in project_license
+    assert "Copyright (c) 2025 Tomas Aidukas" in notices
+    assert "10.5281/zenodo.17434349" in notices
+    assert "10.5281/zenodo.10606662" in notices
+    assert "CC-BY-4.0" in notices
+    assert project_license_bytes == (ROOT / "LICENSE").read_bytes()
+    assert notices_bytes == (ROOT / "THIRD_PARTY_NOTICES.md").read_bytes()
+
+    sdist = next(dist.glob("hyperspectrum-*.tar.gz"))
+    with tarfile.open(sdist, "r:gz") as archive:
+        sdist_names = set(archive.getnames())
+        root = next(
+            name.removesuffix("/pyproject.toml")
+            for name in sdist_names
+            if name.endswith("/pyproject.toml")
+        )
+        sdist_license = archive.extractfile(f"{root}/LICENSE")
+        sdist_notices = archive.extractfile(f"{root}/THIRD_PARTY_NOTICES.md")
+        package_info = archive.extractfile(f"{root}/PKG-INFO")
+        assert sdist_license is not None
+        assert sdist_notices is not None
+        assert package_info is not None
+        assert sdist_license.read() == project_license_bytes
+        assert sdist_notices.read() == notices_bytes
+        package_metadata = package_info.read().decode("utf-8")
+    assert "License-Expression: MIT" in package_metadata
+    assert "License-File: LICENSE" in package_metadata
+    assert "License-File: THIRD_PARTY_NOTICES.md" in package_metadata
 
 
 @pytest.fixture(scope="module")

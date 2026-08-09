@@ -5,6 +5,15 @@ spectral imaging. The initial vertical slice is an end-to-end XAS workflow that
 discovers versioned data in HyperData, runs fixed-weight and classical tools on
 local GPU or Bohr, and publishes quantitative results through ACE Benchmark.
 
+## License and attribution
+
+HyperSpectrum is licensed under the MIT License. See [`LICENSE`](LICENSE) for
+the project terms and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the
+XASDenoise MIT notice, CC-BY-4.0 research-asset attribution, modification
+statements, and the fail-closed policy for unlicensed external sources. Model
+weights and full third-party datasets are not included in the source or Python
+distributions.
+
 The approved design is documented in
 [`docs/superpowers/specs/2026-08-08-hyper-spectrum-xas-agent-runtime-design.md`](docs/superpowers/specs/2026-08-08-hyper-spectrum-xas-agent-runtime-design.md).
 
