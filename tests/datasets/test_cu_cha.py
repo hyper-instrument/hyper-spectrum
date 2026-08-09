@@ -265,6 +265,7 @@ def test_seed_binds_every_reproducibility_input() -> None:
         "source_path": "data_txt/High-Cu_exp/1_at_200C_segment.dat",
         "dose_fraction": 0.25,
         "contract_version": "hyperspectrum-cu-cha-poisson/v1",
+        "numpy_version": "2.4.6",
     }
     baseline = derive_cu_cha_seed(**arguments)
 
@@ -282,6 +283,11 @@ def test_seed_binds_every_reproducibility_input() -> None:
         changed[name] = value
         assert derive_cu_cha_seed(**changed) != baseline
 
+    incompatible = dict(arguments)
+    incompatible["numpy_version"] = "2.4.7"
+    with pytest.raises(ValueError, match="official NumPy Poisson ABI.*2.4.6"):
+        derive_cu_cha_seed(**incompatible)
+
 
 def test_poisson_thinning_is_exactly_reproducible_and_uses_both_channels(
     tmp_path: Path,
@@ -291,8 +297,18 @@ def test_poisson_thinning_is_exactly_reproducible_and_uses_both_channels(
     spectrum = parse_cu_cha_dat(source)
     seed = 123456789
 
-    first = poisson_thin_transmission(spectrum, dose_fraction=0.25, seed=seed)
-    second = poisson_thin_transmission(spectrum, dose_fraction=0.25, seed=seed)
+    first = poisson_thin_transmission(
+        spectrum,
+        dose_fraction=0.25,
+        seed=seed,
+        expected_numpy_version="2.4.6",
+    )
+    second = poisson_thin_transmission(
+        spectrum,
+        dose_fraction=0.25,
+        seed=seed,
+        expected_numpy_version="2.4.6",
+    )
     generator = np.random.Generator(np.random.PCG64(seed))
     expected_i0 = generator.poisson(0.25 * spectrum.i0).astype(np.float64) / 0.25
     expected_i1 = generator.poisson(0.25 * spectrum.i1).astype(np.float64) / 0.25
@@ -307,6 +323,52 @@ def test_poisson_thinning_is_exactly_reproducible_and_uses_both_channels(
     assert first.seed == seed
 
 
+@pytest.mark.skipif(
+    np.__version__ != "2.4.6",
+    reason="this golden vector owns the official NumPy 2.4.6 Poisson ABI",
+)
+def test_numpy_246_pcg64_poisson_distribution_golden_vector() -> None:
+    # Break caught: Generator.poisson is not covered by NumPy's compatibility promise.
+    i0 = np.array([10, 1_000, 25_000, 100_000, 250_000], dtype=np.float64)
+    i1 = np.array([20, 2_000, 50_000, 200_000, 500_000], dtype=np.float64)
+    spectrum = ParsedCuChaSpectrum(
+        energy_ev=np.arange(5, dtype=np.float64) + 1.0,
+        mu_trans=np.log(i0 / i1),
+        mu_ref=np.zeros(5, dtype=np.float64),
+        i0=i0,
+        i1=i1,
+        i2=np.ones(5, dtype=np.float64),
+    )
+
+    thinned = poisson_thin_transmission(
+        spectrum,
+        dose_fraction=1.0,
+        seed=0xC0DEC0DE,
+        expected_numpy_version="2.4.6",
+    )
+
+    np.testing.assert_array_equal(thinned.noisy_i0, [8, 987, 24_795, 100_193, 250_603])
+    np.testing.assert_array_equal(
+        thinned.noisy_i1, [21, 1_981, 50_296, 200_749, 500_595]
+    )
+
+
+def test_poisson_thinning_fails_closed_on_numpy_version_mismatch(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "scan.dat"
+    source.write_bytes(_dat_bytes())
+    spectrum = parse_cu_cha_dat(source)
+
+    with pytest.raises(ValueError, match="exact NumPy runtime version"):
+        poisson_thin_transmission(
+            spectrum,
+            dose_fraction=0.25,
+            seed=123456789,
+            expected_numpy_version="2.4.7",
+        )
+
+
 def test_poisson_thinning_rejects_zero_counts_without_epsilon_correction() -> None:
     low_count = np.ones(5, dtype=np.float64)
     spectrum = ParsedCuChaSpectrum(
@@ -319,7 +381,12 @@ def test_poisson_thinning_rejects_zero_counts_without_epsilon_correction() -> No
     )
 
     with pytest.raises(SpectrumRejected) as error:
-        poisson_thin_transmission(spectrum, dose_fraction=0.10, seed=0)
+        poisson_thin_transmission(
+            spectrum,
+            dose_fraction=0.10,
+            seed=0,
+            expected_numpy_version="2.4.6",
+        )
 
     assert error.value.code == "zero_thinned_count"
 
@@ -403,6 +470,13 @@ def test_materializer_builds_three_honest_tracks_with_shared_split(
         "leaderboard_scored_split": "test",
         "scorer_only_asset": "benchmark_with_proxy_target",
     }
+    assert root_manifest["corruption_runtime"] == {
+        "schema_version": "hyperspectrum-numpy-poisson-abi/v1",
+        "numpy_version": "2.4.6",
+        "bit_generator": "numpy.random.PCG64",
+        "distribution": "numpy.random.Generator.poisson",
+        "draw_order": ["I0", "I1"],
+    }
     assert [track["dose_fraction"] for track in root_manifest["tracks"]] == [
         0.10,
         0.25,
@@ -420,6 +494,12 @@ def test_materializer_builds_three_honest_tracks_with_shared_split(
     assert result.to_dict()["schema_version"] == (
         "hyperspectrum-cu-cha-materialization-result/v2"
     )
+    for track in result.tracks:
+        track_manifest = json.loads(track.manifest_path.read_text(encoding="utf-8"))
+        assert (
+            track_manifest["corruption"]["distribution_abi"]
+            == root_manifest["corruption_runtime"]
+        )
 
     pairs_by_dose = {
         dose: load_cu_cha_denoising_pairs(
@@ -456,6 +536,24 @@ def test_materializer_builds_three_honest_tracks_with_shared_split(
             "noisy",
             "sample_ids",
         }
+
+
+def test_materializer_fails_closed_outside_official_numpy_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "source"
+    declaration = _source_fixture(source_root)
+    output = tmp_path / "output"
+    monkeypatch.setattr(np, "__version__", "2.4.7")
+
+    with pytest.raises(ValueError, match="official NumPy Poisson ABI.*2.4.6"):
+        materialize_cu_cha(
+            source_root=source_root,
+            source_declaration_file=declaration,
+            output_directory=output,
+        )
+
+    assert not output.exists()
 
 
 def test_materialization_is_byte_deterministic_across_declaration_order(
@@ -630,6 +728,28 @@ def test_loader_requires_external_profile_trust_root(tmp_path: Path) -> None:
         load_cu_cha_denoising_pairs(
             output,
             dose_fraction=0.10,
+            expected_profile_sha256=trusted_sha256,
+        )
+
+
+def test_loader_fails_closed_before_poisson_regeneration_on_numpy_abi_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "source"
+    declaration = _source_fixture(source_root)
+    output = tmp_path / "output"
+    materialize_cu_cha(
+        source_root=source_root,
+        source_declaration_file=declaration,
+        output_directory=output,
+    )
+    trusted_sha256 = _profile_sha256(output)
+    monkeypatch.setattr(np, "__version__", f"{np.__version__}+different")
+
+    with pytest.raises(ValueError, match="exact NumPy runtime version"):
+        load_cu_cha_denoising_pairs(
+            output,
+            dose_fraction=0.25,
             expected_profile_sha256=trusted_sha256,
         )
 

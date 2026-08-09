@@ -39,6 +39,10 @@ _SCAN_NAME = re.compile(
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 DEFAULT_CORRUPTION_CONTRACT = "hyperspectrum-cu-cha-poisson/v1"
+NUMPY_POISSON_ABI_SCHEMA_VERSION = "hyperspectrum-numpy-poisson-abi/v1"
+NUMPY_POISSON_BIT_GENERATOR = "numpy.random.PCG64"
+NUMPY_POISSON_DISTRIBUTION = "numpy.random.Generator.poisson"
+NUMPY_POISSON_VERSION = "2.4.6"
 PROFILE_SCHEMA_VERSION = "hyperspectrum-xas-denoising-profile/v2"
 SOURCE_DECLARATION_SCHEMA_VERSION = "hyperspectrum-cu-cha-source-declaration/v1"
 DATASET_CODE = "zenodo-10159154"
@@ -177,12 +181,24 @@ def derive_cu_cha_seed(
     source_sha256: str,
     source_path: str,
     dose_fraction: float,
+    numpy_version: str,
     contract_version: str = DEFAULT_CORRUPTION_CONTRACT,
 ) -> int:
     """Derive a stable 64-bit RNG seed from all corruption identity inputs."""
 
-    if not dataset_version.strip() or not contract_version.strip():
-        raise ValueError("dataset and corruption contract versions must be non-blank")
+    if (
+        not dataset_version.strip()
+        or not contract_version.strip()
+        or not numpy_version.strip()
+    ):
+        raise ValueError(
+            "dataset, corruption contract, and NumPy versions must be non-blank"
+        )
+    if numpy_version != NUMPY_POISSON_VERSION:
+        raise ValueError(
+            "the official NumPy Poisson ABI requires NumPy "
+            f"{NUMPY_POISSON_VERSION}; received {numpy_version}"
+        )
     if _SHA256.fullmatch(source_sha256) is None:
         raise ValueError("source_sha256 must be a lowercase SHA-256")
     parsed = PurePosixPath(source_path)
@@ -201,6 +217,12 @@ def derive_cu_cha_seed(
         "contract_version": contract_version,
         "dataset_version": dataset_version,
         "dose_fraction": dose_fraction,
+        "distribution_abi": {
+            "bit_generator": NUMPY_POISSON_BIT_GENERATOR,
+            "distribution": NUMPY_POISSON_DISTRIBUTION,
+            "numpy_version": numpy_version,
+            "schema_version": NUMPY_POISSON_ABI_SCHEMA_VERSION,
+        },
         "source_path": source_path,
         "source_sha256": source_sha256,
     }
@@ -219,6 +241,7 @@ def poisson_thin_transmission(
     *,
     dose_fraction: float,
     seed: int,
+    expected_numpy_version: str,
 ) -> PoissonThinnedTransmission:
     """Poisson-thin I0/I1 independently and recompute the transmission signal."""
 
@@ -226,6 +249,7 @@ def poisson_thin_transmission(
         raise ValueError("dose_fraction must be finite and in (0, 1]")
     if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**64:
         raise ValueError("seed must be an unsigned 64-bit integer")
+    _require_exact_numpy_poisson_runtime(expected_numpy_version)
     generator = np.random.Generator(np.random.PCG64(seed))
     noisy_i0 = generator.poisson(dose_fraction * spectrum.i0).astype(np.float64)
     noisy_i1 = generator.poisson(dose_fraction * spectrum.i1).astype(np.float64)
@@ -243,6 +267,52 @@ def poisson_thin_transmission(
         dose_fraction=dose_fraction,
         seed=seed,
     )
+
+
+def _numpy_poisson_runtime() -> dict[str, object]:
+    return {
+        "schema_version": NUMPY_POISSON_ABI_SCHEMA_VERSION,
+        "numpy_version": NUMPY_POISSON_VERSION,
+        "bit_generator": NUMPY_POISSON_BIT_GENERATOR,
+        "distribution": NUMPY_POISSON_DISTRIBUTION,
+        "draw_order": ["I0", "I1"],
+    }
+
+
+def _require_exact_numpy_poisson_runtime(expected_numpy_version: str) -> None:
+    if not isinstance(expected_numpy_version, str) or not expected_numpy_version:
+        raise ValueError("expected NumPy runtime version must be non-blank")
+    if expected_numpy_version != NUMPY_POISSON_VERSION:
+        raise ValueError(
+            "the official NumPy Poisson ABI requires exact NumPy runtime version "
+            f"{NUMPY_POISSON_VERSION}; received contract {expected_numpy_version!r}"
+        )
+    if np.__version__ != NUMPY_POISSON_VERSION:
+        raise ValueError(
+            "the official NumPy Poisson ABI requires exact NumPy runtime version "
+            f"{NUMPY_POISSON_VERSION!r}; "
+            f"found {np.__version__!r}"
+        )
+
+
+def _validate_numpy_poisson_runtime(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "numpy_version",
+        "bit_generator",
+        "distribution",
+        "draw_order",
+    }:
+        raise ValueError("profile NumPy Poisson distribution ABI is invalid")
+    numpy_version = value.get("numpy_version")
+    if not isinstance(numpy_version, str):
+        raise TypeError("profile NumPy Poisson distribution ABI is invalid")
+    # Check the version before invoking any NumPy distribution method. NumPy does
+    # not promise cross-version compatibility for Generator.poisson.
+    _require_exact_numpy_poisson_runtime(numpy_version)
+    if value != _numpy_poisson_runtime():
+        raise ValueError("profile NumPy Poisson distribution ABI is invalid")
+    return cast(dict[str, object], value)
 
 
 def _canonical_json_bytes(value: object) -> bytes:
@@ -631,6 +701,9 @@ def materialize_cu_cha(
 
     if output_directory.exists():
         raise FileExistsError(f"output directory already exists: {output_directory}")
+    _require_exact_numpy_poisson_runtime(NUMPY_POISSON_VERSION)
+    corruption_runtime = _numpy_poisson_runtime()
+    numpy_version = cast(str, corruption_runtime["numpy_version"])
     (
         dataset,
         verified_files,
@@ -669,6 +742,7 @@ def materialize_cu_cha(
                 source_sha256=item.source.sha256,
                 source_path=item.source.path,
                 dose_fraction=dose_fraction,
+                numpy_version=numpy_version,
             )
             seeds.append(seed)
             thinned.append(
@@ -676,6 +750,7 @@ def materialize_cu_cha(
                     item.spectrum,
                     dose_fraction=dose_fraction,
                     seed=seed,
+                    expected_numpy_version=numpy_version,
                 )
             )
         noisy = np.stack([item.noisy_mu_trans for item in thinned])
@@ -725,6 +800,7 @@ def materialize_cu_cha(
                 "algorithm": "Poisson(dose_fraction * count) / dose_fraction",
                 "channels": ["I0", "I1"],
                 "contract_version": DEFAULT_CORRUPTION_CONTRACT,
+                "distribution_abi": corruption_runtime,
                 "zero_count_policy": "reject_without_epsilon_correction",
             },
             "target": {
@@ -760,6 +836,7 @@ def materialize_cu_cha(
         "schema_version": PROFILE_SCHEMA_VERSION,
         "profile_code": "cu-cha-operando-full-count-proxy",
         "dataset": dataset,
+        "corruption_runtime": corruption_runtime,
         "source": {
             "declaration_digest": declaration_digest,
             "content_manifest_digest": content_manifest_digest,
@@ -914,6 +991,7 @@ def _validate_profile_manifest(
             "schema_version",
             "profile_code",
             "dataset",
+            "corruption_runtime",
             "source",
             "signal",
             "target",
@@ -930,6 +1008,8 @@ def _validate_profile_manifest(
         or root.get("execution_boundary") != expected_execution_boundary
     ):
         raise ValueError("profile manifest has an invalid v2 root contract")
+
+    _validate_numpy_poisson_runtime(root["corruption_runtime"])
 
     dataset = root["dataset"]
     if (
@@ -1119,6 +1199,7 @@ def load_cu_cha_denoising_pairs(
         "algorithm": "Poisson(dose_fraction * count) / dose_fraction",
         "channels": ["I0", "I1"],
         "contract_version": DEFAULT_CORRUPTION_CONTRACT,
+        "distribution_abi": root["corruption_runtime"],
         "zero_count_policy": "reject_without_epsilon_correction",
     }
     expected_target = {
@@ -1359,6 +1440,12 @@ def load_cu_cha_denoising_pairs(
                 source_sha256=source_sha256[index],
                 source_path=source_paths[index],
                 dose_fraction=dose_fraction,
+                numpy_version=cast(
+                    str,
+                    cast(dict[str, object], root["corruption_runtime"])[
+                        "numpy_version"
+                    ],
+                ),
                 contract_version=DEFAULT_CORRUPTION_CONTRACT,
             )
             for index in range(count)

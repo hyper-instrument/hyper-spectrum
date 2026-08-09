@@ -68,10 +68,36 @@ source root.
 
 The three fixed tracks are dose fractions `0.10`, `0.25`, and `0.50`. For each
 sample and dose, a 64-bit seed is derived from dataset version ID, source
-SHA-256, relative path, dose, and corruption-contract version. A fixed PCG64
-generator samples `Poisson(dose * I0)` and then `Poisson(dose * I1)`, rescales
-both channels, and recomputes `log(I0/I1)`. A zero sampled count rejects the
-materialization; no epsilon correction is hidden in the scientific contract.
+SHA-256, relative path, dose, corruption-contract version, and the exact NumPy
+distribution ABI identity. A fixed PCG64 generator samples
+`Poisson(dose * I0)` and then `Poisson(dose * I1)`, rescales both channels, and
+recomputes `log(I0/I1)`. A zero sampled count rejects the materialization; no
+epsilon correction is hidden in the scientific contract.
+
+PCG64's random-bit stream compatibility does not extend to
+`Generator.poisson`. Consequently, the root manifest and every track manifest
+freeze the exact `numpy_version`, `numpy.random.PCG64`,
+`numpy.random.Generator.poisson`, and `I0`-then-`I1` draw order under
+`hyperspectrum-numpy-poisson-abi/v1`. This profile has one official
+distribution runtime: `numpy==2.4.6`, matching the verified ACE XAS runtime.
+The materializer, direct thinning API, and loader all fail closed before any
+Poisson draw when either the declared or installed version differs. The ACE
+runner image must therefore install `numpy==2.4.6`; the project's general
+library dependency range is not a reproducibility claim for this profile.
+Generating an alternative profile under whatever NumPy happens to be installed
+is deliberately forbidden.
+
+Use the lock's Python 3.11 environment for local materialization and verify it
+before producing an official asset:
+
+```bash
+uv sync --python 3.11 --frozen
+.venv/bin/python -c 'import numpy; assert numpy.__version__ == "2.4.6"'
+```
+
+The ACE Dockerfile/lock must make the equivalent exact pin and its offline
+contract test must assert `numpy.__version__ == "2.4.6"` before invoking the
+adapter.
 
 The benchmark target is always:
 
@@ -112,7 +138,8 @@ root `manifest.json` bytes. `load_cu_cha_denoising_pairs` requires that value as
 `expected_profile_sha256` and verifies it before trusting any internal digest.
 The loader then validates both NPZ schemas, exact inference/benchmark input
 equality, physical count/log-ratio relationships, path-derived identities,
-split strata, per-sample seed derivation, and regenerated PCG64 Poisson draws.
+split strata, per-sample seed derivation, the exact NumPy distribution ABI, and
+regenerated PCG64 Poisson draws.
 Callers must persist the externally trusted profile digest separately; reading
 a digest from the bundle being validated is not a trust root.
 

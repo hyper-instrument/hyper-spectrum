@@ -116,6 +116,13 @@ adapter must receive that externally persisted digest and pass it as the
 required `expected_profile_sha256`; a digest read back from the same untrusted
 bundle is not sufficient.
 
+Cu-CHA Poisson artifacts also freeze `numpy==2.4.6` and the
+`Generator(PCG64).poisson` ABI in both root and track manifests. Because NumPy
+does not guarantee distribution-level compatibility, the materializer and
+loader both fail before drawing when the runtime differs. Use the locked Python
+3.11 environment (`uv sync --python 3.11 --frozen`), and pin the same exact
+version in the ACE image.
+
 For the fixed-weight adapter, replace `--tool-id savgol` with
 `--tool-id xasdenoise`, add `--weight-file MODEL.pth` to both `run plan` and
 `run local`, and optionally request `--device cpu`, `--device cuda:N`, or the
