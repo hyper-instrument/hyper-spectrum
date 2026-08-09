@@ -466,7 +466,7 @@ def test_materializer_builds_three_honest_tracks_with_shared_split(
     }
     assert root_manifest["compatibility"]["ace_v3"] == "requires_profile_v2_adapter"
     assert root_manifest["execution_boundary"] == {
-        "candidate_container_asset": "inference_only",
+        "candidate_container_asset": "inference_only_test_split",
         "leaderboard_scored_split": "test",
         "scorer_only_asset": "benchmark_with_proxy_target",
     }
@@ -536,6 +536,116 @@ def test_materializer_builds_three_honest_tracks_with_shared_split(
             "noisy",
             "sample_ids",
         }
+
+
+def _split_by_sample(output: Path) -> dict[str, str]:
+    payload = json.loads((output / "split.json").read_text(encoding="utf-8"))
+    return {entry["sample_id"]: entry["split"] for entry in payload["entries"]}
+
+
+def test_candidate_inference_asset_carries_only_the_scored_test_rows(
+    tmp_path: Path,
+) -> None:
+    # Break caught: an inference asset carrying train/val rows hands a candidate
+    # container rows it is not asked to answer, and every prediction it makes for
+    # them is split leakage the scorer must refuse. The candidate cannot filter —
+    # the split is a scorer-only asset — so the filtering has to happen here.
+    source_root = tmp_path / "source"
+    declaration = _source_fixture(source_root)
+    output = tmp_path / "output"
+
+    materialize_cu_cha(
+        source_root=source_root,
+        source_declaration_file=declaration,
+        output_directory=output,
+    )
+
+    splits = _split_by_sample(output)
+    expected_test_ids = sorted(
+        sample_id for sample_id, split in splits.items() if split == "test"
+    )
+    assert 0 < len(expected_test_ids) < len(splits)
+
+    for track in ("dose-0.10", "dose-0.25", "dose-0.50"):
+        track_directory = output / "tracks" / track
+        with np.load(track_directory / "inference.npz", allow_pickle=False) as asset:
+            inference = {
+                name: np.array(asset[name], copy=True) for name in asset.files
+            }
+        with np.load(track_directory / "benchmark.npz", allow_pickle=False) as asset:
+            benchmark = {
+                name: np.array(asset[name], copy=True) for name in asset.files
+            }
+
+        assert inference["sample_ids"].tolist() == expected_test_ids
+        assert not {
+            str(value)
+            for value in inference["sample_ids"]
+        } & {sample_id for sample_id, split in splits.items() if split != "test"}
+
+        rows = [
+            index
+            for index, sample_id in enumerate(benchmark["sample_ids"].tolist())
+            if splits[str(sample_id)] == "test"
+        ]
+        np.testing.assert_array_equal(inference["energy"], benchmark["energy"][rows])
+        np.testing.assert_array_equal(inference["noisy"], benchmark["noisy"][rows])
+        assert inference["group_ids"].tolist() == benchmark["group_ids"][rows].tolist()
+        assert str(inference["energy_unit"]) == "eV"
+
+        # The scorer half keeps every row: only the candidate's view narrows.
+        assert len(benchmark["sample_ids"]) == len(splits)
+
+        track_manifest = json.loads(
+            (track_directory / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert track_manifest["inference_asset"]["contract"] == (
+            "hyperspectrum-local-inference-npz/v2"
+        )
+
+
+def test_loader_rejects_an_inference_asset_that_readmits_untested_rows(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a re-materialization that quietly went back to every row would
+    # otherwise differ from a compliant one only by digest, and a digest tells an
+    # operator that something moved, not that leakage came back.
+    source_root = tmp_path / "source"
+    declaration = _source_fixture(source_root)
+    output = tmp_path / "output"
+    materialize_cu_cha(
+        source_root=source_root,
+        source_declaration_file=declaration,
+        output_directory=output,
+    )
+    track_directory = output / "tracks/dose-0.25"
+    with np.load(track_directory / "benchmark.npz", allow_pickle=False) as loaded:
+        benchmark = {name: np.array(loaded[name], copy=True) for name in loaded.files}
+    inference_path = track_directory / "inference.npz"
+    np.savez(
+        inference_path,
+        energy=benchmark["energy"],
+        energy_unit=np.asarray("eV"),
+        group_ids=benchmark["group_ids"],
+        noisy=benchmark["noisy"],
+        sample_ids=benchmark["sample_ids"],
+    )
+    inference_sha256 = hashlib.sha256(inference_path.read_bytes()).hexdigest()
+    track_manifest_path = track_directory / "manifest.json"
+    track_manifest = json.loads(track_manifest_path.read_text(encoding="utf-8"))
+    track_manifest["inference_asset"]["sha256"] = inference_sha256
+    track_manifest_path.write_text(json.dumps(track_manifest), encoding="utf-8")
+    root_path = output / "manifest.json"
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    root["tracks"][1]["inference_asset_sha256"] = inference_sha256
+    root_path.write_text(json.dumps(root), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="inference.*test"):
+        load_cu_cha_denoising_pairs(
+            output,
+            dose_fraction=0.25,
+            expected_profile_sha256=_profile_sha256(output),
+        )
 
 
 def test_materializer_fails_closed_outside_official_numpy_runtime(

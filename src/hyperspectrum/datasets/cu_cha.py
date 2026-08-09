@@ -45,6 +45,17 @@ NUMPY_POISSON_DISTRIBUTION = "numpy.random.Generator.poisson"
 NUMPY_POISSON_VERSION = "2.4.6"
 PROFILE_SCHEMA_VERSION = "hyperspectrum-xas-denoising-profile/v2"
 SOURCE_DECLARATION_SCHEMA_VERSION = "hyperspectrum-cu-cha-source-declaration/v1"
+#: The candidate-facing half of a track, and the contract that names what is in
+#: it. ``/v1`` carried every split's rows; ``/v2`` carries the scored test rows
+#: and nothing else. The version moves rather than only the digest because a
+#: digest tells an operator that the bytes changed, and this changed what the
+#: bytes *mean* — see ``CANDIDATE_CONTAINER_ASSET`` for its root-manifest twin.
+INFERENCE_ASSET_CONTRACT = "hyperspectrum-local-inference-npz/v2"
+#: The root manifest's own statement of the same fact, checked exactly by both
+#: this loader and ACE's profile adapter, so a ``/v1`` materialization cannot be
+#: read as a ``/v2`` one by either side.
+CANDIDATE_CONTAINER_ASSET = "inference_only_test_split"
+CANDIDATE_SCORED_SPLIT: SplitName = "test"
 DATASET_CODE = "zenodo-10159154"
 DOSE_FRACTIONS = (0.10, 0.25, 0.50)
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
@@ -730,6 +741,13 @@ def materialize_cu_cha(
     source_paths = np.asarray([item.source.path for item in admitted])
     source_sha256 = np.asarray([item.source.sha256 for item in admitted])
     splits = np.asarray([split_by_sample[item.identity.sample_id] for item in admitted])
+    # The one place the candidate's view is narrowed. Computed from the same
+    # split manifest the scorer is given, on the sorted sample order both assets
+    # share, so "the rows the candidate receives" and "the rows the scorer will
+    # accept a prediction for" are one selection rather than two that agree.
+    scored_rows = np.flatnonzero(splits == CANDIDATE_SCORED_SPLIT)
+    if scored_rows.size == 0:
+        raise ValueError("profile split must assign at least one scored test sample")
 
     track_payloads: list[dict[str, object]] = []
     track_file_bytes: list[tuple[str, bytes, bytes, bytes]] = []
@@ -781,11 +799,11 @@ def materialize_cu_cha(
         )
         inference_bytes = _canonical_npz(
             {
-                "energy": energy,
+                "energy": energy[scored_rows],
                 "energy_unit": np.asarray("eV"),
-                "group_ids": group_ids,
-                "noisy": noisy,
-                "sample_ids": sample_ids,
+                "group_ids": group_ids[scored_rows],
+                "noisy": noisy[scored_rows],
+                "sample_ids": sample_ids[scored_rows],
             }
         )
         benchmark_digest = hashlib.sha256(benchmark_bytes).hexdigest()
@@ -816,7 +834,7 @@ def materialize_cu_cha(
             "inference_asset": {
                 "path": "inference.npz",
                 "sha256": inference_digest,
-                "contract": "hyperspectrum-local-inference-npz/v1",
+                "contract": INFERENCE_ASSET_CONTRACT,
             },
         }
         track_manifest_bytes = _canonical_json_bytes(track_manifest) + b"\n"
@@ -872,7 +890,7 @@ def materialize_cu_cha(
             "v1_xanes_contract_reused": False,
         },
         "execution_boundary": {
-            "candidate_container_asset": "inference_only",
+            "candidate_container_asset": CANDIDATE_CONTAINER_ASSET,
             "leaderboard_scored_split": "test",
             "scorer_only_asset": "benchmark_with_proxy_target",
         },
@@ -981,7 +999,7 @@ def _validate_profile_manifest(
         "v1_xanes_contract_reused": False,
     }
     expected_execution_boundary = {
-        "candidate_container_asset": "inference_only",
+        "candidate_container_asset": CANDIDATE_CONTAINER_ASSET,
         "leaderboard_scored_split": "test",
         "scorer_only_asset": "benchmark_with_proxy_target",
     }
@@ -1214,7 +1232,7 @@ def load_cu_cha_denoising_pairs(
     expected_inference_asset = {
         "path": "inference.npz",
         "sha256": track.get("inference_asset_sha256"),
-        "contract": "hyperspectrum-local-inference-npz/v1",
+        "contract": INFERENCE_ASSET_CONTRACT,
     }
     if (
         set(track_manifest)
@@ -1425,13 +1443,26 @@ def load_cu_cha_denoising_pairs(
         or any(_SHA256.fullmatch(value) is None for value in source_sha256)
     ):
         raise ValueError("benchmark sample identities are inconsistent")
+    # The candidate half is the benchmark's scored rows and only those. Both
+    # halves of that sentence are checked here: the same numbers (so the two
+    # assets cannot drift into describing different measurements) and no other
+    # row (so a materialization that readmitted train and validation rows is
+    # refused by name rather than discovered later as split leakage in a
+    # candidate's answer, which is where the cost is).
+    scored_rows = [
+        index for index, split in enumerate(splits) if split == CANDIDATE_SCORED_SPLIT
+    ]
+    if not scored_rows:
+        raise ValueError("benchmark declares no scored test rows")
     if (
-        not np.array_equal(inference_energy, energy)
-        or not np.array_equal(inference_noisy, noisy)
-        or inference_sample_ids.tolist() != sample_ids
-        or inference_group_ids.tolist() != group_ids
+        not np.array_equal(inference_energy, energy[scored_rows])
+        or not np.array_equal(inference_noisy, noisy[scored_rows])
+        or inference_sample_ids.tolist() != [sample_ids[index] for index in scored_rows]
+        or inference_group_ids.tolist() != [group_ids[index] for index in scored_rows]
     ):
-        raise ValueError("inference arrays do not exactly match the benchmark inputs")
+        raise ValueError(
+            "inference arrays are not exactly the benchmark's test-split inputs"
+        )
 
     expected_seeds = np.asarray(
         [
