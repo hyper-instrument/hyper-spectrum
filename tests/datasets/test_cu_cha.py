@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -123,6 +124,7 @@ def test_relative_path_identity_uses_experiment_and_condition_segment() -> None:
     assert identity.condition_segment == "Proc5_SO2_O2_cycles_1st_SO2"
     assert identity.group_id == ("High-Cu_cycles_SO2_O2/Proc5_SO2_O2_cycles_1st_SO2")
     assert identity.cu_loading == "High-Cu"
+    assert identity.protocol_family == "cycles"
     assert identity.scan_index == 100
     assert identity.temperature_c == 199
 
@@ -134,6 +136,7 @@ def test_relative_path_identity_uses_experiment_and_condition_segment() -> None:
         "data_txt\\High-Cu_cycles\\a.dat",
         "data_txt/../High-Cu_cycles/a.dat",
         "data_txt/Other/100_at_199C_Proc5.dat",
+        "data_txt/High-Cu_unknown_SO2/100_at_199C_Proc5.dat",
         "data_txt/Low-Cu_cycles/bad-name.dat",
     ],
 )
@@ -142,13 +145,20 @@ def test_relative_path_identity_fails_closed(relative_path: str) -> None:
         parse_cu_cha_identity(relative_path)
 
 
-def _identity(sample_id: str, group_id: str) -> CuChaSpectrumIdentity:
+def _identity(
+    sample_id: str,
+    group_id: str,
+    *,
+    cu_loading: str,
+    protocol_family: str,
+) -> CuChaSpectrumIdentity:
     return CuChaSpectrumIdentity(
         sample_id=sample_id,
         experiment=group_id.split("/", maxsplit=1)[0],
         condition_segment=group_id.split("/", maxsplit=1)[1],
         group_id=group_id,
-        cu_loading="High-Cu",
+        cu_loading=cu_loading,
+        protocol_family=protocol_family,
         scan_index=1,
         temperature_c=200,
     )
@@ -156,8 +166,14 @@ def _identity(sample_id: str, group_id: str) -> CuChaSpectrumIdentity:
 
 def test_grouped_balanced_split_is_order_independent_and_leakage_safe() -> None:
     identities = tuple(
-        _identity(f"sample-{group}-{index}", f"High-Cu_exp/{group}")
-        for group, size in (("a", 7), ("b", 5), ("c", 4), ("d", 3), ("e", 2))
+        _identity(
+            f"sample-{loading}-{protocol}-{group}-{index}",
+            f"{loading}_{protocol}_experiment/{group}",
+            cu_loading=loading,
+            protocol_family=protocol,
+        )
+        for loading, protocol in (("High-Cu", "exposure"), ("Low-Cu", "cycles"))
+        for group, size in (("a", 7), ("b", 5), ("c", 4), ("d", 3))
         for index in range(size)
     )
 
@@ -171,26 +187,75 @@ def test_grouped_balanced_split_is_order_independent_and_leakage_safe() -> None:
     for entry in first.entries:
         group_splits.setdefault(entry.group_id, set()).add(entry.split)
     assert all(len(splits) == 1 for splits in group_splits.values())
+    identity_by_sample = {identity.sample_id: identity for identity in identities}
+    stratum_splits: dict[tuple[str, str], set[str]] = {}
+    for entry in first.entries:
+        identity = identity_by_sample[entry.sample_id]
+        stratum_splits.setdefault(
+            (identity.cu_loading, identity.protocol_family), set()
+        ).add(entry.split)
+    assert all(splits == {"train", "val", "test"} for splits in stratum_splits.values())
 
 
 def test_grouped_balanced_split_requires_three_groups_and_unique_samples() -> None:
     with pytest.raises(ValueError, match="at least three"):
         build_grouped_balanced_split(
             (
-                _identity("sample-a", "High-Cu_exp/a"),
-                _identity("sample-b", "High-Cu_exp/b"),
+                _identity(
+                    "sample-a",
+                    "High-Cu_exposure_exp/a",
+                    cu_loading="High-Cu",
+                    protocol_family="exposure",
+                ),
+                _identity(
+                    "sample-b",
+                    "High-Cu_exposure_exp/b",
+                    cu_loading="High-Cu",
+                    protocol_family="exposure",
+                ),
             )
         )
-    duplicate = _identity("duplicate", "High-Cu_exp/a")
+    duplicate = _identity(
+        "duplicate",
+        "High-Cu_exposure_exp/a",
+        cu_loading="High-Cu",
+        protocol_family="exposure",
+    )
     with pytest.raises(ValueError, match="unique"):
         build_grouped_balanced_split(
             (
                 duplicate,
                 duplicate,
-                _identity("b", "High-Cu_exp/b"),
-                _identity("c", "High-Cu_exp/c"),
+                _identity(
+                    "b",
+                    "High-Cu_exposure_exp/b",
+                    cu_loading="High-Cu",
+                    protocol_family="exposure",
+                ),
+                _identity(
+                    "c",
+                    "High-Cu_exposure_exp/c",
+                    cu_loading="High-Cu",
+                    protocol_family="exposure",
+                ),
             )
         )
+
+
+def test_grouped_balanced_split_rejects_one_undercovered_stratum() -> None:
+    identities = tuple(
+        _identity(
+            f"sample-{protocol}-{group}",
+            f"High-Cu_{protocol}_experiment/{group}",
+            cu_loading="High-Cu",
+            protocol_family=protocol,
+        )
+        for protocol, groups in (("exposure", ("a", "b", "c")), ("cycles", ("d", "e")))
+        for group in groups
+    )
+
+    with pytest.raises(ValueError, match="stratum.*at least three"):
+        build_grouped_balanced_split(identities)
 
 
 def test_seed_binds_every_reproducibility_input() -> None:
@@ -261,10 +326,16 @@ def test_poisson_thinning_rejects_zero_counts_without_epsilon_correction() -> No
 
 def _source_fixture(root: Path, *, reverse_declaration: bool = False) -> Path:
     declarations: list[dict[str, object]] = []
-    for group_index, group in enumerate(("alpha", "beta", "gamma", "delta", "epsilon")):
+    source_groups = (
+        (loading, protocol, group)
+        for loading in ("High-Cu", "Low-Cu")
+        for protocol in ("exposure", "cycles")
+        for group in ("alpha", "beta", "gamma")
+    )
+    for group_index, (loading, protocol, group) in enumerate(source_groups):
         relative = (
-            f"data_txt/High-Cu_exposure_{group}/"
-            f"{group_index + 1}_at_200C_Proc_{group}.dat"
+            f"data_txt/{loading}_{protocol}_{group}/"
+            f"{group_index + 1}_at_200C_Proc_{loading}_{protocol}_{group}.dat"
         )
         content = _dat_bytes(
             mu_trans=np.array([0.01, 0.03, 0.08, 0.15, 0.22]) + group_index * 0.001,
@@ -301,6 +372,10 @@ def _all_output_bytes(root: Path) -> dict[str, bytes]:
     }
 
 
+def _profile_sha256(root: Path) -> str:
+    return hashlib.sha256((root / "manifest.json").read_bytes()).hexdigest()
+
+
 def test_materializer_builds_three_honest_tracks_with_shared_split(
     tmp_path: Path,
 ) -> None:
@@ -333,24 +408,36 @@ def test_materializer_builds_three_honest_tracks_with_shared_split(
         0.25,
         0.50,
     ]
+    assert root_manifest["split"]["strata"] == ["cu_loading", "protocol_family"]
+    assert len(root_manifest["split"]["stratum_counts"]) == 4
+    for summary in root_manifest["split"]["stratum_counts"]:
+        assert summary["group_count"] == 3
+        assert summary["sample_count"] == 3
+        assert summary["split_group_counts"] == {"train": 1, "val": 1, "test": 1}
+        assert summary["split_sample_counts"] == {"train": 1, "val": 1, "test": 1}
     assert len(result.tracks) == 3
+    assert result.profile_sha256 == _profile_sha256(output)
     assert result.to_dict()["schema_version"] == (
         "hyperspectrum-cu-cha-materialization-result/v2"
     )
 
     pairs_by_dose = {
-        dose: load_cu_cha_denoising_pairs(output, dose_fraction=dose)
+        dose: load_cu_cha_denoising_pairs(
+            output,
+            dose_fraction=dose,
+            expected_profile_sha256=_profile_sha256(output),
+        )
         for dose in (0.10, 0.25, 0.50)
     }
     for pairs in pairs_by_dose.values():
-        assert len(pairs) == 5
+        assert len(pairs) == 12
         assert {pair.split for pair in pairs} == {"train", "val", "test"}
         assert all(
             pair.clean.provenance["ground_truth_kind"] == "proxy_full_count"
             and pair.clean.provenance["is_physical_noiseless_ground_truth"] is False
             for pair in pairs
         )
-    for index in range(5):
+    for index in range(12):
         np.testing.assert_array_equal(
             pairs_by_dose[0.10][index].clean.signal,
             pairs_by_dose[0.50][index].clean.signal,
@@ -438,6 +525,46 @@ def test_source_integrity_rejects_symlink_even_when_declared_bytes_match(
     assert not output.exists()
 
 
+def test_source_integrity_rejects_symlink_swap_between_scan_and_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source_root = tmp_path / "source"
+    declaration_file = _source_fixture(source_root)
+    declaration = json.loads(declaration_file.read_text(encoding="utf-8"))
+    target = source_root / declaration["files"][0]["path"]
+    outside = tmp_path / "outside-secret.dat"
+    outside.write_bytes(b"must-not-be-read")
+    original_open = os.open
+    swapped = False
+
+    def racing_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if dir_fd is not None and os.fspath(path) == target.name and not swapped:
+            target.unlink()
+            target.symlink_to(outside)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", racing_open)
+    output = tmp_path / "output"
+
+    with pytest.raises(ValueError, match="secure no-follow"):
+        materialize_cu_cha(
+            source_root=source_root,
+            source_declaration_file=declaration_file,
+            output_directory=output,
+        )
+
+    assert swapped is True
+    assert not output.exists()
+
+
 def test_output_is_atomically_cleaned_when_bundle_write_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -477,7 +604,147 @@ def test_loader_rejects_tampered_benchmark_asset(tmp_path: Path) -> None:
     asset.write_bytes(asset.read_bytes() + b"tamper")
 
     with pytest.raises(ValueError, match="SHA-256"):
-        load_cu_cha_denoising_pairs(output, dose_fraction=0.25)
+        load_cu_cha_denoising_pairs(
+            output,
+            dose_fraction=0.25,
+            expected_profile_sha256=_profile_sha256(output),
+        )
+
+
+def test_loader_requires_external_profile_trust_root(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    declaration = _source_fixture(source_root)
+    output = tmp_path / "output"
+    materialize_cu_cha(
+        source_root=source_root,
+        source_declaration_file=declaration,
+        output_directory=output,
+    )
+    trusted_sha256 = _profile_sha256(output)
+    root_path = output / "manifest.json"
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    root["tracks"][0]["benchmark_asset_sha256"] = "0" * 64
+    root_path.write_text(json.dumps(root), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="profile manifest SHA-256"):
+        load_cu_cha_denoising_pairs(
+            output,
+            dose_fraction=0.10,
+            expected_profile_sha256=trusted_sha256,
+        )
+
+
+def test_loader_rejects_self_consistent_scientific_benchmark_tamper(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    declaration = _source_fixture(source_root)
+    output = tmp_path / "output"
+    materialize_cu_cha(
+        source_root=source_root,
+        source_declaration_file=declaration,
+        output_directory=output,
+    )
+    benchmark_path = output / "tracks/dose-0.25/benchmark.npz"
+    with np.load(benchmark_path, allow_pickle=False) as loaded:
+        arrays = {name: np.array(loaded[name], copy=True) for name in loaded.files}
+    arrays["proxy_full_count"][0, 0] += 1.0
+    np.savez(benchmark_path, **arrays)
+    benchmark_sha256 = hashlib.sha256(benchmark_path.read_bytes()).hexdigest()
+    track_manifest_path = output / "tracks/dose-0.25/manifest.json"
+    track_manifest = json.loads(track_manifest_path.read_text(encoding="utf-8"))
+    track_manifest["benchmark_asset"]["sha256"] = benchmark_sha256
+    track_manifest_path.write_text(json.dumps(track_manifest), encoding="utf-8")
+    root_path = output / "manifest.json"
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    root["tracks"][1]["benchmark_asset_sha256"] = benchmark_sha256
+    root_path.write_text(json.dumps(root), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="full-count proxy"):
+        load_cu_cha_denoising_pairs(
+            output,
+            dose_fraction=0.25,
+            expected_profile_sha256=_profile_sha256(output),
+        )
+
+
+def test_loader_rejects_self_consistent_inference_benchmark_mismatch(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    declaration = _source_fixture(source_root)
+    output = tmp_path / "output"
+    materialize_cu_cha(
+        source_root=source_root,
+        source_declaration_file=declaration,
+        output_directory=output,
+    )
+    inference_path = output / "tracks/dose-0.25/inference.npz"
+    with np.load(inference_path, allow_pickle=False) as loaded:
+        arrays = {name: np.array(loaded[name], copy=True) for name in loaded.files}
+    arrays["noisy"][0, 0] += 1.0
+    np.savez(inference_path, **arrays)
+    inference_sha256 = hashlib.sha256(inference_path.read_bytes()).hexdigest()
+    track_manifest_path = output / "tracks/dose-0.25/manifest.json"
+    track_manifest = json.loads(track_manifest_path.read_text(encoding="utf-8"))
+    track_manifest["inference_asset"]["sha256"] = inference_sha256
+    track_manifest_path.write_text(json.dumps(track_manifest), encoding="utf-8")
+    root_path = output / "manifest.json"
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    root["tracks"][1]["inference_asset_sha256"] = inference_sha256
+    root_path.write_text(json.dumps(root), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="inference.*benchmark"):
+        load_cu_cha_denoising_pairs(
+            output,
+            dose_fraction=0.25,
+            expected_profile_sha256=_profile_sha256(output),
+        )
+
+
+def test_loader_rejects_self_consistent_but_nonreproducible_poisson_counts(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    declaration = _source_fixture(source_root)
+    output = tmp_path / "output"
+    materialize_cu_cha(
+        source_root=source_root,
+        source_declaration_file=declaration,
+        output_directory=output,
+    )
+    benchmark_path = output / "tracks/dose-0.25/benchmark.npz"
+    with np.load(benchmark_path, allow_pickle=False) as loaded:
+        benchmark = {name: np.array(loaded[name], copy=True) for name in loaded.files}
+    benchmark["noisy_i0_counts"][0, 0] += 4.0
+    benchmark["noisy"][0, 0] = np.log(
+        benchmark["noisy_i0_counts"][0, 0] / benchmark["noisy_i1_counts"][0, 0]
+    )
+    np.savez(benchmark_path, **benchmark)
+    inference_path = output / "tracks/dose-0.25/inference.npz"
+    with np.load(inference_path, allow_pickle=False) as loaded:
+        inference = {name: np.array(loaded[name], copy=True) for name in loaded.files}
+    inference["noisy"][0, 0] = benchmark["noisy"][0, 0]
+    np.savez(inference_path, **inference)
+    benchmark_sha256 = hashlib.sha256(benchmark_path.read_bytes()).hexdigest()
+    inference_sha256 = hashlib.sha256(inference_path.read_bytes()).hexdigest()
+    track_manifest_path = output / "tracks/dose-0.25/manifest.json"
+    track_manifest = json.loads(track_manifest_path.read_text(encoding="utf-8"))
+    track_manifest["benchmark_asset"]["sha256"] = benchmark_sha256
+    track_manifest["inference_asset"]["sha256"] = inference_sha256
+    track_manifest_path.write_text(json.dumps(track_manifest), encoding="utf-8")
+    root_path = output / "manifest.json"
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    root["tracks"][1]["benchmark_asset_sha256"] = benchmark_sha256
+    root["tracks"][1]["inference_asset_sha256"] = inference_sha256
+    root_path.write_text(json.dumps(root), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Poisson draws"):
+        load_cu_cha_denoising_pairs(
+            output,
+            dose_fraction=0.25,
+            expected_profile_sha256=_profile_sha256(output),
+        )
 
 
 def test_loader_rejects_tampered_track_manifest_and_inference_asset(
@@ -497,7 +764,11 @@ def test_loader_rejects_tampered_track_manifest_and_inference_asset(
     track_manifest_path.write_text(json.dumps(track_manifest), encoding="utf-8")
 
     with pytest.raises(ValueError, match="track manifest"):
-        load_cu_cha_denoising_pairs(output, dose_fraction=0.25)
+        load_cu_cha_denoising_pairs(
+            output,
+            dose_fraction=0.25,
+            expected_profile_sha256=_profile_sha256(output),
+        )
 
     # Restore the manifest, then prove the target-free execution input is bound too.
     track_manifest["target"]["ground_truth_kind"] = "proxy_full_count"
@@ -505,7 +776,11 @@ def test_loader_rejects_tampered_track_manifest_and_inference_asset(
     inference = output / "tracks/dose-0.25/inference.npz"
     inference.write_bytes(inference.read_bytes() + b"tamper")
     with pytest.raises(ValueError, match="inference asset SHA-256"):
-        load_cu_cha_denoising_pairs(output, dose_fraction=0.25)
+        load_cu_cha_denoising_pairs(
+            output,
+            dose_fraction=0.25,
+            expected_profile_sha256=_profile_sha256(output),
+        )
 
 
 @pytest.mark.parametrize("field", ["dataset", "source", "split"])
@@ -526,4 +801,8 @@ def test_loader_rejects_malformed_root_manifest_objects(
     root_manifest_path.write_text(json.dumps(root_manifest), encoding="utf-8")
 
     with pytest.raises(ValueError, match="profile manifest"):
-        load_cu_cha_denoising_pairs(output, dose_fraction=0.25)
+        load_cu_cha_denoising_pairs(
+            output,
+            dose_fraction=0.25,
+            expected_profile_sha256=_profile_sha256(output),
+        )

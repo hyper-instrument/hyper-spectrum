@@ -111,6 +111,11 @@ test split. See
 [`docs/dev/2026-08-09-cu-cha-profile-v2.md`](docs/dev/2026-08-09-cu-cha-profile-v2.md)
 for the source declaration and compatibility boundary.
 
+The command result includes `profile_sha256`. Every later loader, agent, or ACE
+adapter must receive that externally persisted digest and pass it as the
+required `expected_profile_sha256`; a digest read back from the same untrusted
+bundle is not sufficient.
+
 For the fixed-weight adapter, replace `--tool-id savgol` with
 `--tool-id xasdenoise`, add `--weight-file MODEL.pth` to both `run plan` and
 `run local`, and optionally request `--device cpu`, `--device cuda:N`, or the

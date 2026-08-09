@@ -21,6 +21,15 @@ Cu-CHA naming convention. The leakage unit is
 from the filename. A deterministic size-balanced policy assigns complete
 groups to train, validation, or test; all dose variants reuse this one split.
 
+The audited experiment-directory vocabulary is fail-closed:
+`High-Cu|Low-Cu` is followed by exactly `exposure|cycles` and then a non-empty
+experiment suffix. These first two tokens define `cu_loading` and
+`protocol_family`; an unknown token is rejected rather than guessed. Splitting
+is performed independently inside every `cu_loading × protocol_family`
+stratum. Each stratum must contain at least three condition groups so train,
+validation, and test are all represented. The root manifest records the two
+strata keys plus per-stratum group and sample counts for every split.
+
 ## Source declaration
 
 The command accepts a strict complete-tree declaration. `files` order is not
@@ -36,7 +45,7 @@ semantically significant; the materializer canonicalizes it before hashing.
   },
   "files": [
     {
-      "path": "data_txt/High-Cu_PROTOCOL/1_at_200C_CONDITION.dat",
+      "path": "data_txt/High-Cu_exposure_PROTOCOL/1_at_200C_CONDITION.dat",
       "size": 12345,
       "sha256": "LOWERCASE_64_CHARACTER_SHA256"
     }
@@ -47,6 +56,13 @@ semantically significant; the materializer canonicalizes it before hashing.
 The observed relative path set, byte size, and SHA-256 must all match before
 the output directory is created. The example values are structural placeholders
 and must never be copied into an official asset record.
+
+Source reads use a directory-FD/openat walk with `O_NOFOLLOW`. The root, every
+parent directory, and the final regular file must retain the scanned
+device/inode identity; final-file size, mtime, and ctime must also remain stable
+before and after reading from the same FD. A platform without these primitives
+fails closed. This prevents a scan/read symlink-swap from escaping the declared
+source root.
 
 ## Corruption and target semantics
 
@@ -90,6 +106,15 @@ group/split identity, and source provenance. `inference.npz` contains only the
 five fields accepted by HyperSpectrum's reusable local inference boundary:
 energy, noisy signal, sample IDs, group IDs, and energy unit. The public loader
 returns core `DenoisingPair` objects for quantitative evaluation.
+
+The materialization result publishes `profile_sha256`, the SHA-256 of the exact
+root `manifest.json` bytes. `load_cu_cha_denoising_pairs` requires that value as
+`expected_profile_sha256` and verifies it before trusting any internal digest.
+The loader then validates both NPZ schemas, exact inference/benchmark input
+equality, physical count/log-ratio relationships, path-derived identities,
+split strata, per-sample seed derivation, and regenerated PCG64 Poisson draws.
+Callers must persist the externally trusted profile digest separately; reading
+a digest from the bundle being validated is not a trust root.
 
 The execution security boundary is mandatory: a candidate model container may
 receive only the selected track's `inference.npz`; `benchmark.npz`, its proxy
