@@ -1,11 +1,11 @@
 schema_version: hyperspectrum-tool/v1
 id: xasdenoise
-version: 22363b96cd1e797f7b34d39948f50f4d4b899a2c
+version: bda749ee956f9e02acc6995f238d759682ee2ca8
 modalities: [xas]
 tasks: [denoising]
 runtime:
   kind: python
-entrypoint: adapters/xasdenoise/run.py
+entrypoint: hyperspectrum.adapters.xasdenoise:denoise_spectra
 inputs:
   - role: raw_signal
     kind: dense_array
@@ -16,16 +16,22 @@ resources:
   cpu: 4
   memory_gb: 16
   gpu: optional
-verify: [python, -m, hyperspectrum.adapters.xasdenoise, --verify]
+verify: [python3, -m, hyperspectrum.adapters.xasdenoise, --verify]
 source:
   kind: git
-  repository: https://github.com/Even-Ma/xas.git
-  commit: 22363b96cd1e797f7b34d39948f50f4d4b899a2c
-license: unknown
-distribution: private-validation-only
+  repository: https://github.com/tomasaidukas/XASDenoise.git
+  commit: bda749ee956f9e02acc6995f238d759682ee2ca8
+license: MIT
+distribution: open-distribution
 weights:
   required: true
-  state: required-missing
+  state: present
   allow_download: false
+  digest: 09620ee9ea0c96585f534d76ce42aa72edf2cf71e481f5737e43e93116e24160
+  asset_id: zenodo-17434349
+  source_url: https://zenodo.org/api/records/17434349/files/xas_denoiser_model_noise2noise_nonuniformly_sampled_notnormalized.pth/content
+  filename: xas_denoiser_model_noise2noise_nonuniformly_sampled_notnormalized.pth
+  size_bytes: 780409
+  license: CC-BY-4.0
 training:
   enabled: false

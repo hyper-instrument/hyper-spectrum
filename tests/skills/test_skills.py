@@ -87,5 +87,11 @@ def test_run_skill_enforces_dry_run_leakage_overwrite_and_authority_gates() -> N
         "never physical noiseless ground truth",
         "reject every unrecognized extra member",
         "ace owns formal",
+        "zenodo-17434349",
+        "cc-by-4.0 weights",
+        "--weight-file model.pth",
+        "identity_raw",
+        "hyperspectrum-xasdenoise-step-baseline/v1",
+        "same `hyperspectrum.adapters.xasdenoise:denoise_spectra` entrypoint",
     ):
         assert required in text

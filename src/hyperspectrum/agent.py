@@ -42,6 +42,7 @@ from hyperspectrum.process_boundary import redact_text, redact_value
 from hyperspectrum.registry import ResourceBudget, ToolRegistry, load_tool_manifest
 from hyperspectrum.registry.models import (
     LicensePolicy,
+    ToolAvailability,
     ToolManifest,
     ToolMatchRequest,
 )
@@ -261,8 +262,14 @@ def match_tools(task: str) -> ServiceResponse:
         }
         for tool in registry.match(request)
     ]
+    tools_by_id = {tool.id: tool for tool in tools}
     blocked = [
-        {"id": rejection.tool_id, "reasons": list(rejection.reasons)}
+        {
+            "id": rejection.tool_id,
+            "reasons": list(rejection.reasons),
+            "manifest": tools_by_id[rejection.tool_id].model_dump(mode="json"),
+            "tool_digest": tools_by_id[rejection.tool_id].tool_digest,
+        }
         for rejection in registry.rejections(request)
     ]
     return ServiceResponse(
@@ -305,6 +312,8 @@ def plan_run(
     max_samples: int,
     sample_ids: tuple[str, ...],
     dry_run: bool,
+    weight_files: tuple[Path, ...] = (),
+    device: str = "auto",
 ) -> ServiceResponse:
     """Build one immutable local plan from explicit public contract files."""
 
@@ -318,13 +327,27 @@ def plan_run(
     try:
         benchmark_asset = load_benchmark_asset_identity(benchmark_manifest_file)
     except (OSError, TypeError, ValueError) as error:
-        raise AgentRequestError(f"benchmark manifest violates its contract: {error}") from error
+        raise AgentRequestError(
+            f"benchmark manifest violates its contract: {error}"
+        ) from error
     tool = _load_tool(tool_id)
-    registry = ToolRegistry((tool,))
-    availability = registry.availability(tool)
-    if not availability.available:
-        reasons = ", ".join(availability.reasons)
-        raise AgentMissingAssetError(f"tool '{tool.id}' is unavailable: {reasons}")
+    availability = _availability_with_mounted_weights(tool, weight_files)
+    parameters: dict[str, object]
+    if tool.id == "xasdenoise":
+        parameters = {
+            "normalization_method": "identity_raw",
+            "model_normalization_method": None,
+            "preprocessing": {
+                "schema_version": "hyperspectrum-xasdenoise-step-baseline/v1",
+                "method": "symmetric_tanh_step",
+                "inverse": "add_same_fitted_baseline",
+            },
+            "device": device,
+        }
+    else:
+        if device != "auto":
+            raise AgentRequestError("--device is supported only for XASDenoise")
+        parameters = {"window_length": 5, "polyorder": 2}
     try:
         plan = build_run_plan(
             task=task,
@@ -334,12 +357,16 @@ def plan_run(
             tool=tool,
             availability=availability,
             backend="local",
-            resources=ResourceBudget(cpu=1, memory_gb=1.0, gpu_available=False),
+            resources=ResourceBudget(
+                cpu=tool.resources.cpu,
+                memory_gb=tool.resources.memory_gb,
+                gpu_available=device.startswith("cuda"),
+            ),
             max_samples=max_samples,
             selected_sample_ids=sample_ids,
             output_directory=output_directory,
             dry_run=dry_run,
-            parameters={"window_length": 5, "polyorder": 2},
+            parameters=parameters,
             data_origin="real",
         )
     except (TypeError, ValueError, ValidationError) as error:
@@ -350,7 +377,11 @@ def plan_run(
 
 
 def run_local(
-    *, plan_file: Path, source_npz: Path, sample_ids: tuple[str, ...]
+    *,
+    plan_file: Path,
+    source_npz: Path,
+    sample_ids: tuple[str, ...],
+    weight_files: tuple[Path, ...] = (),
 ) -> ServiceResponse:
     """Execute an admitted plan through the public atomic local executor."""
 
@@ -364,12 +395,52 @@ def run_local(
             tool=tool,
             selected_sample_ids=sample_ids,
             source_npz=source_npz,
+            weight_files=weight_files,
         )
     except FileNotFoundError as error:
         raise AgentMissingAssetError(str(error)) from error
     except (TypeError, ValueError, FileExistsError, OSError) as error:
         raise AgentExecutionError(str(error)) from error
     return ServiceResponse(result={"prediction_bundle": bundle.model_dump(mode="json")})
+
+
+def _availability_with_mounted_weights(
+    tool: ToolManifest, weight_files: tuple[Path, ...]
+) -> ToolAvailability:
+    """Verify external weights without importing or executing model code."""
+
+    registry_availability = ToolRegistry((tool,)).availability(tool)
+    non_weight_reasons = tuple(
+        reason
+        for reason in registry_availability.reasons
+        if reason not in {"weights-required-missing", "weights-unverified"}
+    )
+    if non_weight_reasons:
+        reasons = ", ".join(non_weight_reasons)
+        raise AgentMissingAssetError(f"tool '{tool.id}' is unavailable: {reasons}")
+    if not tool.weights.required:
+        if weight_files:
+            raise AgentRequestError(
+                f"tool '{tool.id}' does not accept mounted weight assets"
+            )
+        return registry_availability
+    if len(weight_files) != 1:
+        raise AgentMissingAssetError(
+            f"tool '{tool.id}' requires exactly one --weight-file"
+        )
+    if tool.id != "xasdenoise":
+        raise AgentMissingAssetError(
+            f"tool '{tool.id}' has no registered weight verifier"
+        )
+    from hyperspectrum.adapters.xasdenoise import verify_weight_asset
+
+    try:
+        verify_weight_asset(weight_files[0])
+    except (OSError, TypeError, ValueError) as error:
+        raise AgentMissingAssetError(
+            f"tool '{tool.id}' weight asset failed verification: {error}"
+        ) from error
+    return ToolAvailability(available=True)
 
 
 def _read_model(path: Path, model: type[BaseModel], label: str) -> Any:

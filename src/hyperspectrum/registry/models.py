@@ -12,7 +12,9 @@ from __future__ import annotations
 import json
 import re
 from hashlib import sha256
+from pathlib import PurePath
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -170,12 +172,24 @@ class WeightsSpec(BaseModel):
     state: WeightsState
     allow_download: Literal[False]
     digest: str | None = None
+    asset_id: str | None = None
+    source_url: str | None = None
+    filename: str | None = None
+    size_bytes: int | None = Field(default=None, gt=0)
+    license: str | None = None
 
     @field_validator("digest")
     @classmethod
     def require_sha256_weight_digest(cls, value: str | None) -> str | None:
         if value is not None and _SHA256_DIGEST.fullmatch(value) is None:
             raise ValueError("weight digest must be a 64-character lowercase SHA-256")
+        return value
+
+    @field_validator("asset_id", "source_url", "filename", "license")
+    @classmethod
+    def require_nonblank_asset_text(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("weight asset metadata must be non-blank")
         return value
 
     @model_validator(mode="after")
@@ -188,6 +202,25 @@ class WeightsSpec(BaseModel):
             raise ValueError("present weights require a weight digest")
         if self.state != "present" and self.digest is not None:
             raise ValueError("only present weights may declare a weight digest")
+        asset_values = (
+            self.asset_id,
+            self.source_url,
+            self.filename,
+            self.size_bytes,
+            self.license,
+        )
+        if self.state == "present" and any(value is None for value in asset_values):
+            raise ValueError(
+                "present weights require complete declarative asset metadata"
+            )
+        if self.state != "present" and any(value is not None for value in asset_values):
+            raise ValueError("only present weights may declare asset metadata")
+        if self.source_url is not None:
+            parsed = urlparse(self.source_url)
+            if parsed.scheme != "https" or not parsed.netloc:
+                raise ValueError("weight source_url must be an absolute HTTPS URL")
+        if self.filename is not None and PurePath(self.filename).name != self.filename:
+            raise ValueError("weight filename must be a basename")
         return self
 
 

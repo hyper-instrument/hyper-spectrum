@@ -20,9 +20,15 @@ scoring, reports, and leaderboards.
    ```
 
    Require an exact `scoreable` denoising verdict, pinned dataset version/digest,
-   declared ground-truth role, safe split keys, and an available `savgol` match.
-   Treat blocked tools as evidence, never as permission to fetch weights, install,
-   adapt an adapter, or substitute code.
+   declared ground-truth role, and safe split keys. `savgol` is the unweighted
+   match. `xasdenoise` is the registered fixed-weight option: its blocked record
+   must expose upstream commit
+   `bda749ee956f9e02acc6995f238d759682ee2ca8`, MIT code, Zenodo asset
+   `zenodo-17434349`, CC-BY-4.0 weights, size 780409, and SHA-256
+   `09620ee9ea0c96585f534d76ce42aa72edf2cf71e481f5737e43e93116e24160`.
+   `weights-unverified` is resolved only by an explicitly authorized, already
+   mounted matching file. Never fetch weights, install, adapt an adapter, or
+   substitute code.
 
 ## Plan First
 
@@ -63,6 +69,16 @@ Ground truth is readiness and later ACE-evaluation evidence only. Never read cle
 arrays to choose parameters, samples, preprocessing, or outputs. Keep the declared
 SavGol parameters fixed; do not tune, fit, score, rank, or select favorable cases.
 
+For XASDenoise, use `--tool-id xasdenoise --weight-file MODEL.pth` for both the
+dry and executable plans and retain the same option for `run local`. The mounted
+file must match the declared size and SHA-256 before any model module or PyTorch
+checkpoint loader runs. Choose `--device cpu`, `--device cuda:N`, or the explicit
+`--device auto` fallback policy. The checkpoint normalization is null, so require
+canonical `identity_raw`; never substitute per-spectrum range normalization.
+Preserve the recorded `hyperspectrum-xasdenoise-step-baseline/v1` fit and inverse
+state. CPU, local GPU, OCI, and Bohr must all call the same
+`hyperspectrum.adapters.xasdenoise:denoise_spectra` entrypoint.
+
 ## Authorization Gate
 
 Stop after the dry-run unless the user explicitly authorizes local execution.
@@ -81,6 +97,8 @@ After explicit local-run authorization, re-check that `RUN_DIR` is absent, repea
   --sample-id SAMPLE_ID \
   --json
 ```
+
+Add the exact same `--weight-file MODEL.pth` for an authorized XASDenoise run.
 
 Repeat `--sample-id` for each predeclared sample. Supply noisy inference inputs;
 do not inspect targets to choose parameters or samples. A legacy v2

@@ -118,7 +118,9 @@ class _RunPlanBase(BaseModel):
 
     @field_validator("selected_sample_ids")
     @classmethod
-    def require_explicit_unique_selection(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+    def require_explicit_unique_selection(
+        cls, value: tuple[str, ...]
+    ) -> tuple[str, ...]:
         if not value:
             raise ValueError("selected sample IDs must not be empty")
         if any(not sample_id.strip() for sample_id in value):
@@ -254,6 +256,7 @@ def build_run_plan(
     _require_resources(tool, resources)
 
     frozen_parameters = freeze_json_mapping(parameters)
+    _require_tool_parameters(tool, frozen_parameters)
     resolved = resolve_local_entrypoint(tool)
     weight_digest = _weight_digest(tool)
     model_digest = canonical_digest(
@@ -269,9 +272,7 @@ def build_run_plan(
         dataset_code=dataset.dataset_code,
         dataset_version=dataset_version,
         source_dataset_digest=benchmark_asset.source_dataset_digest,
-        source_content_manifest_digest=(
-            benchmark_asset.source_content_manifest_digest
-        ),
+        source_content_manifest_digest=(benchmark_asset.source_content_manifest_digest),
         benchmark_asset_digest=benchmark_asset.benchmark_asset_digest,
         tool_id=tool.id,
         tool_digest=tool.tool_digest,
@@ -342,6 +343,47 @@ def _require_resources(tool: ToolManifest, resources: ResourceBudget) -> None:
         raise ValueError("backend memory resources do not meet the tool requirement")
     if tool.resources.gpu == "required" and not resources.gpu_available:
         raise ValueError("backend GPU resources do not meet the tool requirement")
+
+
+def _require_tool_parameters(tool: ToolManifest, parameters: FrozenJsonMapping) -> None:
+    """Freeze non-negotiable scientific semantics for fixed-weight adapters."""
+
+    if tool.id != "xasdenoise":
+        return
+    expected_keys = {
+        "normalization_method",
+        "model_normalization_method",
+        "preprocessing",
+        "device",
+    }
+    if set(parameters) != expected_keys:
+        raise ValueError(
+            "XASDenoise parameters must declare only normalization, preprocessing, and device"
+        )
+    if parameters["normalization_method"] != "identity_raw":
+        raise ValueError("XASDenoise requires explicit identity_raw normalization")
+    if parameters["model_normalization_method"] is not None:
+        raise ValueError(
+            "the official XASDenoise checkpoint declares null normalization"
+        )
+    preprocessing = parameters["preprocessing"]
+    expected_preprocessing = freeze_json_mapping(
+        {
+            "schema_version": "hyperspectrum-xasdenoise-step-baseline/v1",
+            "method": "symmetric_tanh_step",
+            "inverse": "add_same_fitted_baseline",
+        }
+    )
+    if preprocessing != expected_preprocessing:
+        raise ValueError(
+            "XASDenoise requires the versioned symmetric-tanh step-baseline transform"
+        )
+    device = parameters["device"]
+    if (
+        not isinstance(device, str)
+        or re.fullmatch(r"auto|cpu|cuda(?::[0-9]+)?", device) is None
+    ):
+        raise ValueError("XASDenoise device must be auto, cpu, cuda, or cuda:N")
 
 
 def _weight_digest(tool: ToolManifest) -> str:

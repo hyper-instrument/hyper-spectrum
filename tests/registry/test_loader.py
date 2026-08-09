@@ -13,6 +13,7 @@ from hyperspectrum.registry.models import (
     LicensePolicy,
     ResourceBudget,
     ToolAvailability,
+    ToolManifest,
     ToolMatchRequest,
 )
 
@@ -62,15 +63,57 @@ def test_loads_built_in_classical_baseline_with_local_revision() -> None:
     assert tool.training.enabled is False
 
 
-def test_loads_pinned_external_adapter_without_source_or_weights() -> None:
-    # Break caught: the adapter declaration may falsely claim vendored external source or weights.
+def test_loads_exact_licensed_xasdenoise_source_and_weight_asset() -> None:
+    # Break caught: the now-audited adapter could regress to an unknown license,
+    # obsolete source pin, or an unidentifiable checkpoint.
     tool = load_tool_manifest(ROOT / "tools/xas/xasdenoise/tool.yaml")
 
-    assert tool.source.commit == "22363b96cd1e797f7b34d39948f50f4d4b899a2c"
-    assert tool.license == "unknown"
-    assert tool.distribution == "private-validation-only"
-    assert tool.weights.state == "required-missing"
+    assert tool.source.commit == "bda749ee956f9e02acc6995f238d759682ee2ca8"
+    assert tool.license == "MIT"
+    assert tool.distribution == "open-distribution"
+    assert tool.entrypoint == "hyperspectrum.adapters.xasdenoise:denoise_spectra"
+    assert tool.weights.state == "present"
+    assert tool.weights.asset_id == "zenodo-17434349"
+    assert tool.weights.filename == (
+        "xas_denoiser_model_noise2noise_nonuniformly_sampled_notnormalized.pth"
+    )
+    assert tool.weights.size_bytes == 780409
+    assert tool.weights.digest == (
+        "09620ee9ea0c96585f534d76ce42aa72edf2cf71e481f5737e43e93116e24160"
+    )
+    assert tool.weights.license == "CC-BY-4.0"
     assert tool.weights.allow_download is False
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    [
+        ("source_url", "http://example.invalid/model.pth", "HTTPS"),
+        ("filename", "../model.pth", "basename"),
+        ("size_bytes", 0, "greater than 0"),
+        ("license", " ", "non-blank"),
+    ],
+)
+def test_present_weights_reject_invalid_asset_identity(
+    field: str, replacement: object, message: str
+) -> None:
+    raw = load_tool_manifest(ROOT / "tools/xas/xasdenoise/tool.yaml").model_dump(
+        mode="json", exclude_none=True
+    )
+    raw["weights"][field] = replacement  # type: ignore[index]
+
+    with pytest.raises(ValidationError, match=message):
+        ToolManifest.model_validate(raw)
+
+
+def test_present_weights_require_every_asset_identity_field() -> None:
+    raw = load_tool_manifest(ROOT / "tools/xas/xasdenoise/tool.yaml").model_dump(
+        mode="json", exclude_none=True
+    )
+    del raw["weights"]["asset_id"]  # type: ignore[index]
+
+    with pytest.raises(ValidationError, match="complete declarative asset metadata"):
+        ToolManifest.model_validate(raw)
 
 
 def test_rejects_mutable_runtime_image() -> None:
@@ -322,10 +365,9 @@ def test_injected_availability_resolver_allows_deterministic_executable_match() 
     assert registry.match(request) == (tool,)
 
 
-def test_new_local_savgol_wrapper_is_executable_while_external_adapter_remains_unavailable() -> (
-    None
-):
-    # Break caught: Task 6's local wrapper could remain unselectable or unblock the external adapter.
+def test_local_adapters_resolve_but_external_weight_bytes_remain_unverified() -> None:
+    # Break caught: the code adapter could remain unresolvable, or declarative
+    # asset metadata could be mistaken for locally verified checkpoint bytes.
     savgol = load_tool_manifest(ROOT / "tools/xas/savgol/tool.yaml")
     xasdenoise = load_tool_manifest(ROOT / "tools/xas/xasdenoise/tool.yaml")
     registry = ToolRegistry((savgol, xasdenoise))
@@ -342,7 +384,8 @@ def test_new_local_savgol_wrapper_is_executable_while_external_adapter_remains_u
     assert registry.tools == (savgol, xasdenoise)
     assert registry.match(request) == (savgol,)
     assert registry.availability(savgol).available is True
-    assert "entrypoint-unresolvable" in registry.availability(xasdenoise).reasons
+    assert "entrypoint-unresolvable" not in registry.availability(xasdenoise).reasons
+    assert "weights-unverified" in registry.availability(xasdenoise).reasons
 
 
 @pytest.mark.parametrize(
@@ -357,6 +400,11 @@ def test_new_local_savgol_wrapper_is_executable_while_external_adapter_remains_u
                     "state": "present",
                     "allow_download": False,
                     "digest": "b" * 64,
+                    "asset_id": "asset-1",
+                    "source_url": "https://example.invalid/model.pth",
+                    "filename": "model.pth",
+                    "size_bytes": 42,
+                    "license": "CC-BY-4.0",
                 }
             },
             "weights-state-mismatch",

@@ -35,6 +35,26 @@ samples are structured skips and are never converted into zero scores.
 The detailed contract is documented in
 [`docs/superpowers/specs/2026-08-09-unified-spectral-denoising-design.md`](docs/superpowers/specs/2026-08-09-unified-spectral-denoising-design.md).
 
+### Official XASDenoise adapter
+
+The production adapter pins upstream XASDenoise commit
+`bda749ee956f9e02acc6995f238d759682ee2ca8` (MIT) and the CC-BY-4.0 Zenodo
+17434349 checkpoint
+`xas_denoiser_model_noise2noise_nonuniformly_sampled_notnormalized.pth`
+(780409 bytes, SHA-256
+`09620ee9ea0c96585f534d76ce42aa72edf2cf71e481f5737e43e93116e24160`).
+HyperSpectrum never downloads it. Supply the already authorized, mounted file to
+both planning and execution with one `--weight-file PATH` option.
+
+The checkpoint declares `normalization_method: null`; the canonical adapter
+therefore records `identity_raw` and never range-scales each spectrum. It applies
+the upstream symmetric-tanh step baseline before inference, adds that exact
+fitted baseline afterward, and records the versioned fit state and native-output
+semantics per sample. PyTorch is imported only when XASDenoise is constructed.
+The same `denoise_spectra` entrypoint is used on CPU, CUDA, OCI, and Bohr; those
+backends differ only in how the exact plan, benchmark, code, and weight asset are
+staged.
+
 ## Agent CLI
 
 HyperSpectrum owns read-only catalog discovery, evidence-backed task and tool
@@ -61,6 +81,12 @@ The first XAS story uses these commands:
 .venv/bin/hyperspectrum run local --plan-file PLAN.json --source-npz BENCHMARK_DIR/benchmark.npz --sample-id SAMPLE_ID --json
 .venv/bin/hyperspectrum evidence validate --evidence-file XAS_M0_SELECTION.json --json
 ```
+
+For the fixed-weight adapter, replace `--tool-id savgol` with
+`--tool-id xasdenoise`, add `--weight-file MODEL.pth` to both `run plan` and
+`run local`, and optionally request `--device cpu`, `--device cuda:N`, or the
+explicit fallback policy `--device auto` during planning. An explicit CUDA
+request fails when CUDA is unavailable; only `auto` may select CPU.
 
 ## Wire compatibility
 

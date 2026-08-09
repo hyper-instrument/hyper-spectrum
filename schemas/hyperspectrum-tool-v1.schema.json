@@ -71,12 +71,22 @@
     },
     "weights": {
       "type": "object", "additionalProperties": false, "required": ["required", "state", "allow_download"],
-      "properties": {"required": {"type": "boolean"}, "state": {"enum": ["not-required", "present", "required-missing"]}, "allow_download": {"const": false}, "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+      "properties": {
+        "required": {"type": "boolean"},
+        "state": {"enum": ["not-required", "present", "required-missing"]},
+        "allow_download": {"const": false},
+        "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "asset_id": {"type": "string", "minLength": 1},
+        "source_url": {"type": "string", "pattern": "^https://[^/]+/.+"},
+        "filename": {"type": "string", "minLength": 1, "pattern": "^[^/\\\\]+$"},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "license": {"type": "string", "minLength": 1}
+      },
       "allOf": [
         {"if": {"properties": {"required": {"const": true}}}, "then": {"properties": {"state": {"enum": ["present", "required-missing"]}}}},
         {"if": {"properties": {"required": {"const": false}}}, "then": {"properties": {"state": {"const": "not-required"}}}},
-        {"if": {"properties": {"state": {"const": "present"}}}, "then": {"required": ["digest"]}},
-        {"if": {"properties": {"state": {"enum": ["not-required", "required-missing"]}}}, "then": {"not": {"required": ["digest"]}}}
+        {"if": {"properties": {"state": {"const": "present"}}}, "then": {"required": ["digest", "asset_id", "source_url", "filename", "size_bytes", "license"]}},
+        {"if": {"properties": {"state": {"enum": ["not-required", "required-missing"]}}}, "then": {"not": {"anyOf": [{"required": ["digest"]}, {"required": ["asset_id"]}, {"required": ["source_url"]}, {"required": ["filename"]}, {"required": ["size_bytes"]}, {"required": ["license"]}]}}}
       ]
     }
   }

@@ -87,6 +87,25 @@ def test_per_spectrum_range_is_exact_reversible_and_sample_bound() -> None:
         )
 
 
+def test_identity_raw_is_explicit_exact_and_never_range_scales_values() -> None:
+    # Break caught: a checkpoint declaring normalization_method=None could silently
+    # receive the registry's per-spectrum range default instead of raw values.
+    source = sample("xas-raw", [2.0, 4.0, 9.0], unit="ketek/i0 ratio")
+
+    normalized = normalize(source, "identity_raw")
+
+    np.testing.assert_array_equal(normalized.sample.signal, source.signal)
+    assert normalized.sample.signal_unit == "1"
+    assert normalized.state.method == "identity_raw"
+    assert normalized.state.fit_scope == "per_sample"
+    assert normalized.state.invertibility == "exact"
+    assert normalized.state.sample_id == "xas-raw"
+    assert normalized.state.parameters == {"offset": 0.0, "scale": 1.0}
+    recovered = denormalize(normalized)
+    np.testing.assert_array_equal(recovered.signal, source.signal)
+    assert recovered.signal_unit == "ketek/i0 ratio"
+
+
 def test_normalized_value_object_rejects_a_foreign_per_sample_state() -> None:
     # Break caught: sample B could be denormalized with sample A's physical parameters.
     first = normalize(sample("xas-a", [2.0, 4.0, 6.0]), "per_spectrum_range")

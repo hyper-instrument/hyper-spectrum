@@ -1,4 +1,4 @@
 interface:
   display_name: "Run XAS Baseline"
-  short_description: "Plan and run a guarded XAS baseline"
-  default_prompt: "Use $run-xas-baseline to plan a safe XAS denoising baseline run."
+  short_description: "Run guarded SavGol or fixed-weight XASDenoise"
+  default_prompt: "Use $run-xas-baseline to plan a safe SavGol or mounted-weight XASDenoise run."

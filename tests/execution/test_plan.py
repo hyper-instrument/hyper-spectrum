@@ -92,6 +92,23 @@ def savgol() -> ToolManifest:
     return load_tool_manifest(ROOT / "tools/xas/savgol/tool.yaml")
 
 
+def xasdenoise() -> ToolManifest:
+    return load_tool_manifest(ROOT / "tools/xas/xasdenoise/tool.yaml")
+
+
+def xasdenoise_parameters() -> dict[str, object]:
+    return {
+        "normalization_method": "identity_raw",
+        "model_normalization_method": None,
+        "preprocessing": {
+            "schema_version": "hyperspectrum-xasdenoise-step-baseline/v1",
+            "method": "symmetric_tanh_step",
+            "inverse": "add_same_fitted_baseline",
+        },
+        "device": "auto",
+    }
+
+
 def resources(**changes: object) -> ResourceBudget:
     values: dict[str, object] = {"cpu": 2, "memory_gb": 4.0, "gpu_available": False}
     values.update(changes)
@@ -133,9 +150,7 @@ def plan(tmp_path: Path, **changes: object) -> RunPlanV3:
     if "benchmark_asset" not in changes and isinstance(
         selected_dataset, DatasetCandidate
     ):
-        test_asset_digest = selected_dataset.evidence.get(
-            "test_benchmark_asset_digest"
-        )
+        test_asset_digest = selected_dataset.evidence.get("test_benchmark_asset_digest")
         if isinstance(test_asset_digest, str):
             values["benchmark_asset"] = benchmark_asset(
                 benchmark_asset_digest=test_asset_digest
@@ -159,14 +174,17 @@ def test_plan_preserves_every_reproducibility_input_and_detaches_parameters(
     assert result.source_dataset_digest == SOURCE_DATASET_DIGEST
     assert result.source_content_manifest_digest == SOURCE_CONTENT_MANIFEST_DIGEST
     assert result.benchmark_asset_digest == FIXTURE_DIGEST
-    assert len(
-        {
-            result.source_dataset_digest,
-            result.source_content_manifest_digest,
-            result.benchmark_asset_digest,
-            dataset().content_digest,
-        }
-    ) == 4
+    assert (
+        len(
+            {
+                result.source_dataset_digest,
+                result.source_content_manifest_digest,
+                result.benchmark_asset_digest,
+                dataset().content_digest,
+            }
+        )
+        == 4
+    )
     assert result.tool_digest == savgol().tool_digest
     assert len(result.implementation_digest) == 64
     assert result.weight_digest == "none"
@@ -384,43 +402,45 @@ def test_planning_rejects_tool_output_kind_that_differs_from_task(
         plan(tmp_path, task=image_task)
 
 
-def test_planning_rejects_required_missing_and_unverified_model_weights(
+def test_planning_rejects_unverified_mounted_model_weights(
     tmp_path: Path,
 ) -> None:
     # Break caught: model execution could begin before checkpoint integrity was verified.
-    missing = load_tool_manifest(ROOT / "tools/xas/xasdenoise/tool.yaml")
-    present_data = deepcopy(missing.model_dump(mode="json", exclude_none=True))
-    present_data["weights"] = {
-        "required": True,
-        "state": "present",
-        "allow_download": False,
-        "digest": "b" * 64,
-    }
-    present = ToolManifest.model_validate(present_data)
-
-    with pytest.raises(ValueError, match="required weights are missing"):
-        plan(tmp_path, tool=missing, availability=ToolAvailability(available=True))
     with pytest.raises(ValueError, match="weights-unverified"):
         plan(
             tmp_path,
-            tool=present,
+            tool=xasdenoise(),
             availability=ToolAvailability(
                 available=False, reasons=("weights-unverified",)
             ),
+            resources=resources(cpu=4, memory_gb=16),
+            parameters=xasdenoise_parameters(),
         )
 
 
-def test_verified_model_weights_retain_their_exact_digest(tmp_path: Path) -> None:
-    # Break caught: a model plan could erase its checkpoint identity or mislabel it as classical.
-    source = savgol().model_dump(mode="json", exclude_none=True)
-    source["weights"] = {
-        "required": True,
-        "state": "present",
-        "allow_download": False,
-        "digest": "b" * 64,
-    }
-    model = ToolManifest.model_validate(source)
+def test_verified_xasdenoise_plan_records_exact_model_semantics(tmp_path: Path) -> None:
+    # Break caught: the official null normalization could be silently replaced by
+    # range scaling, or the model-native baseline transform could go unversioned.
+    result = plan(
+        tmp_path,
+        tool=xasdenoise(),
+        availability=ToolAvailability(available=True),
+        resources=resources(cpu=4, memory_gb=16),
+        parameters=xasdenoise_parameters(),
+    )
 
-    result = plan(tmp_path, tool=model, availability=ToolAvailability(available=True))
+    assert result.weight_digest == (
+        "09620ee9ea0c96585f534d76ce42aa72edf2cf71e481f5737e43e93116e24160"
+    )
+    assert result.parameters == xasdenoise_parameters()
 
-    assert result.weight_digest == "b" * 64
+    changed = deepcopy(xasdenoise_parameters())
+    changed["normalization_method"] = "per_spectrum_range"
+    with pytest.raises(ValueError, match="identity_raw"):
+        plan(
+            tmp_path,
+            tool=xasdenoise(),
+            availability=ToolAvailability(available=True),
+            resources=resources(cpu=4, memory_gb=16),
+            parameters=changed,
+        )

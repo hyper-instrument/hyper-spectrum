@@ -58,9 +58,7 @@ def data_discover(
 @data_app.command("materialize-xanes-spec")
 def data_materialize_xanes_spec(
     source_root: Annotated[Path, typer.Option("--source-root")],
-    source_declaration_file: Annotated[
-        Path, typer.Option("--source-declaration-file")
-    ],
+    source_declaration_file: Annotated[Path, typer.Option("--source-declaration-file")],
     output_directory: Annotated[Path, typer.Option("--output-directory")],
     dose_fraction: Annotated[float, typer.Option("--dose-fraction")] = 0.25,
     global_seed: Annotated[int, typer.Option("--global-seed")] = 0,
@@ -122,12 +120,12 @@ def run_plan(
     task_file: Annotated[Path, typer.Option("--task-file")],
     candidate_file: Annotated[Path, typer.Option("--candidate-file")],
     verdict_file: Annotated[Path, typer.Option("--verdict-file")],
-    benchmark_manifest_file: Annotated[
-        Path, typer.Option("--benchmark-manifest-file")
-    ],
+    benchmark_manifest_file: Annotated[Path, typer.Option("--benchmark-manifest-file")],
     tool_id: Annotated[str, typer.Option("--tool-id")],
     output_directory: Annotated[Path, typer.Option("--output-directory")],
     sample_ids: Annotated[list[str], typer.Option("--sample-id")],
+    weight_files: Annotated[list[Path] | None, typer.Option("--weight-file")] = None,
+    device: Annotated[str, typer.Option("--device")] = "auto",
     max_samples: Annotated[int, typer.Option("--max-samples", min=1)] = 8,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     json_output: Annotated[
@@ -148,6 +146,8 @@ def run_plan(
         max_samples=max_samples,
         sample_ids=tuple(sample_ids),
         dry_run=dry_run,
+        weight_files=tuple(weight_files or ()),
+        device=device,
     )
 
 
@@ -156,6 +156,7 @@ def run_local(
     plan_file: Annotated[Path, typer.Option("--plan-file")],
     source_npz: Annotated[Path, typer.Option("--source-npz")],
     sample_ids: Annotated[list[str], typer.Option("--sample-id")],
+    weight_files: Annotated[list[Path] | None, typer.Option("--weight-file")] = None,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit one JSON envelope.")
     ] = False,
@@ -168,6 +169,7 @@ def run_local(
         plan_file=plan_file,
         source_npz=source_npz,
         sample_ids=tuple(sample_ids),
+        weight_files=tuple(weight_files or ()),
     )
 
 

@@ -104,9 +104,7 @@ def test_data_discover_forwards_modality_and_profile(
         expected_result={
             "completion": {
                 "complete": True,
-                "queries": [
-                    {"query": "XAS", "pages": 2, "total": 21, "records": 21}
-                ],
+                "queries": [{"query": "XAS", "pages": 2, "total": 21, "records": 21}],
             },
             "candidates": [{"dataset_code": "XAS-1"}],
         },
@@ -276,6 +274,8 @@ def test_run_plan_forwards_only_declared_inputs(
             "max_samples": 8,
             "sample_ids": ("sample-1", "sample-2"),
             "dry_run": True,
+            "weight_files": (),
+            "device": "auto",
         }
     ]
 
@@ -317,6 +317,7 @@ def test_run_local_forwards_plan_source_and_sample_ids(
             "plan_file": plan,
             "source_npz": source,
             "sample_ids": ("sample-1", "sample-2"),
+            "weight_files": (),
         }
     ]
 
@@ -368,8 +369,7 @@ def test_json_service_failure_has_no_naked_stderr_and_redacts_http_authority(
 
     def fail() -> ServiceResponse:
         raise AgentAuthError(
-            f"connection to {placeholder_endpoint} timed out "
-            '{"phase":"connect"}'
+            f'connection to {placeholder_endpoint} timed out {{"phase":"connect"}}'
         )
 
     monkeypatch.setattr(cli.services, "doctor", fail)

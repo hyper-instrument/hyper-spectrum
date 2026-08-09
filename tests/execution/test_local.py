@@ -6,15 +6,22 @@ import json
 import shutil
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from hyperspectrum.adapters.xasdenoise import (
+    XASDenoisePrediction,
+    preprocess_step_baseline,
+)
 from hyperspectrum.contracts import PredictionBundleV2, PredictionBundleV3
 from hyperspectrum.execution import local
 from hyperspectrum.execution.local import execute_local_run
 from hyperspectrum.execution.plan import RunPlanV2, RunPlanV3
 from hyperspectrum.hyperdata.models import DatasetCandidate
+from hyperspectrum.plugins.xas.arrays import XASSpectrum
+from hyperspectrum.registry.models import ResourceBudget, ToolAvailability, ToolManifest
 from hyperspectrum.tasks.recommend import ReadinessVerdict
 
 from .test_plan import (
@@ -24,6 +31,8 @@ from .test_plan import (
     plan,
     savgol,
     verdict,
+    xasdenoise,
+    xasdenoise_parameters,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -194,13 +203,16 @@ def test_local_savgol_smoke_publishes_a_complete_prediction_bundle_without_scori
     assert bundle.provenance["benchmark_asset_digest"] == (
         run_plan.benchmark_asset_digest
     )
-    assert len(
-        {
-            run_plan.source_dataset_digest,
-            run_plan.source_content_manifest_digest,
-            run_plan.benchmark_asset_digest,
-        }
-    ) == 3
+    assert (
+        len(
+            {
+                run_plan.source_dataset_digest,
+                run_plan.source_content_manifest_digest,
+                run_plan.benchmark_asset_digest,
+            }
+        )
+        == 3
+    )
     assert "data_digest" not in bundle.provenance
     assert bundle.provenance["environment_digest"] == run_plan.environment_digest
     assert bundle.provenance["weight_digest"] == "none"
@@ -239,6 +251,94 @@ def test_local_savgol_smoke_publishes_a_complete_prediction_bundle_without_scori
             assert str(output["sample_id"]) in selected
     assert_no_scoring_fields(predictions_data)
     assert_no_scoring_fields(run_data)
+
+
+def test_local_xasdenoise_uses_one_mounted_asset_and_records_preprocessing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Break caught: OCI/Bohr could need a second adapter, or model-native baseline
+    # state could be omitted from the existing v3 PredictionBundle provenance.
+    payload = b"deterministic-fake-state-dict"
+    weights_path = tmp_path / "mounted.pth"
+    weights_path.write_bytes(payload)
+    raw_tool = xasdenoise().model_dump(mode="json", exclude_none=True)
+    raw_tool["weights"] = {
+        "required": True,
+        "state": "present",
+        "allow_download": False,
+        "digest": sha256(payload).hexdigest(),
+        "asset_id": "test-only-asset",
+        "source_url": "https://example.invalid/model.pth",
+        "filename": "model.pth",
+        "size_bytes": len(payload),
+        "license": "test-only",
+    }
+    tool = ToolManifest.model_validate(raw_tool)
+    source = canonical_benchmark_source(tmp_path / "benchmark-input.npz")
+    run_plan = plan(
+        tmp_path,
+        dataset=dataset_for_source(source),
+        verdict=verdict_for_source(source),
+        selected_sample_ids=fixture_ids(2),
+        tool=tool,
+        availability=ToolAvailability(available=True),
+        resources=ResourceBudget(cpu=4, memory_gb=16, gpu_available=False),
+        parameters=xasdenoise_parameters(),
+    )
+    _, _, preprocessing_state = preprocess_step_baseline(
+        np.linspace(5693.0, 5801.4, 135), np.linspace(0.0, 1.0, 135)
+    )
+
+    def fake_runner(
+        spectra: tuple[object, ...], *, weights_path: Path, device: str
+    ) -> tuple[XASDenoisePrediction, ...]:
+        assert weights_path == tmp_path / "mounted.pth"
+        assert device == "auto"
+        return tuple(
+            XASDenoisePrediction(
+                spectrum=item,  # type: ignore[arg-type]
+                method="xasdenoise",
+                optimization_kind="no_training",
+                preprocessing_state=preprocessing_state,
+                device="cpu",
+            )
+            for item in spectra
+        )
+
+    monkeypatch.setattr(
+        local,
+        "_load_tool_callable",
+        lambda resolved, tool_id: SimpleNamespace(
+            runner=fake_runner,
+            prediction_type=XASDenoisePrediction,
+            failure_type=type("NeverFailure", (), {}),
+            spectrum_type=XASSpectrum,
+            isolated_module_names=(),
+        ),
+    )
+
+    bundle = execute_local_run(
+        run_plan,
+        tool=tool,
+        selected_sample_ids=fixture_ids(2),
+        source_npz=source,
+        weight_files=(weights_path,),
+    )
+
+    assert isinstance(bundle, PredictionBundleV3)
+    assert len(bundle.predictions) == 2
+    assert bundle.provenance["weight_digest"] == sha256(payload).hexdigest()
+    preprocessing = bundle.provenance["preprocessing"]
+    assert preprocessing["schema_version"] == (  # type: ignore[index]
+        "hyperspectrum-xasdenoise-step-baseline/v1"
+    )
+    assert preprocessing["normalization_method"] == "identity_raw"  # type: ignore[index]
+    assert [state["sample_id"] for state in preprocessing["states"]] == [  # type: ignore[index]
+        "feo-1",
+        "feo-2",
+    ]
+    assert bundle.provenance["runtime"]["device"] == "cpu"  # type: ignore[index]
+    assert_no_scoring_fields(bundle.model_dump(mode="json"))
 
 
 def test_legacy_v2_plan_still_executes_and_emits_v2_prediction(
@@ -321,9 +421,7 @@ def test_executor_runs_fresh_verified_source_not_a_preimported_callable(
 
     monkeypatch.setattr(baselines, "savgol_filter", wrong_callable)
 
-    source, run_plan = inference_plan(
-        tmp_path, selected_sample_ids=fixture_ids(1)
-    )
+    source, run_plan = inference_plan(tmp_path, selected_sample_ids=fixture_ids(1))
     bundle = execute_local_run(
         run_plan,
         tool=savgol(),
@@ -348,9 +446,7 @@ def test_executor_uses_verified_dependency_bytes_not_cached_module_objects(
             self.intensity = np.zeros_like(values["intensity"])
             self.energy_unit = values["energy_unit"]
 
-    source, run_plan = inference_plan(
-        tmp_path, selected_sample_ids=fixture_ids(1)
-    )
+    source, run_plan = inference_plan(tmp_path, selected_sample_ids=fixture_ids(1))
     monkeypatch.setattr(arrays, "XASSpectrum", WrongSpectrum)
 
     bundle = execute_local_run(
@@ -372,9 +468,7 @@ def test_executor_rejects_changed_local_dependency_bytes(
     # Break caught: arrays.py could change after planning while every recorded digest stayed fixed.
     dependency = (ROOT / "src/hyperspectrum/plugins/xas/arrays.py").resolve()
     original_read_bytes = Path.read_bytes
-    source, run_plan = inference_plan(
-        tmp_path, selected_sample_ids=fixture_ids(1)
-    )
+    source, run_plan = inference_plan(tmp_path, selected_sample_ids=fixture_ids(1))
 
     def changed_read_bytes(path: Path) -> bytes:
         contents = original_read_bytes(path)
@@ -551,7 +645,7 @@ def test_inference_source_rejects_every_extra_array_before_tool_loading(
     def forbidden_loader(*args: object, **kwargs: object) -> object:
         raise AssertionError("tool code must not load")
 
-    monkeypatch.setattr(local, "_load_savgol_callable", forbidden_loader)
+    monkeypatch.setattr(local, "_load_tool_callable", forbidden_loader)
 
     with pytest.raises(ValueError, match="v3.*canonical benchmark"):
         execute_local_run(
@@ -645,7 +739,7 @@ def test_structured_noisy_array_is_rejected_before_tool_loading(
     def forbidden_loader(*args: object, **kwargs: object) -> object:
         raise AssertionError("tool code must not load")
 
-    monkeypatch.setattr(local, "_load_savgol_callable", forbidden_loader)
+    monkeypatch.setattr(local, "_load_tool_callable", forbidden_loader)
 
     with pytest.raises(ValueError, match="structured"):
         execute_local_run(
@@ -721,8 +815,8 @@ def test_unsafe_energy_is_rejected_before_entrypoint_or_tool_loading(
     def forbidden_boundary(*args: object, **kwargs: object) -> object:
         raise AssertionError("entrypoint or tool loading must not run")
 
-    monkeypatch.setattr(local, "_verify_savgol_identity", forbidden_boundary)
-    monkeypatch.setattr(local, "_load_savgol_callable", forbidden_boundary)
+    monkeypatch.setattr(local, "_verify_tool_identity", forbidden_boundary)
+    monkeypatch.setattr(local, "_load_tool_callable", forbidden_boundary)
 
     with pytest.raises((TypeError, ValueError)):
         execute_local_run(
@@ -817,7 +911,7 @@ def test_savgol_policy_rejects_a_different_manifest_entrypoint(tmp_path: Path) -
     )
     source, run_plan = inference_plan(tmp_path, tool=changed)
 
-    with pytest.raises(ValueError, match="SavGol entrypoint"):
+    with pytest.raises(ValueError, match="canonical savgol entrypoint"):
         execute_local_run(
             run_plan,
             tool=changed,

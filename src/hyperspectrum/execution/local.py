@@ -1,4 +1,4 @@
-"""Atomic local execution for the M0 Savitzky-Golay smoke path."""
+"""Atomic local execution for verified XAS denoising tools."""
 
 from __future__ import annotations
 
@@ -39,12 +39,12 @@ from .plan import (
     resolve_local_entrypoint,
 )
 
-SavGolCallable = Callable[..., tuple[object, ...]]
+ToolCallable = Callable[..., tuple[object, ...]]
 
 
 @dataclass(frozen=True, slots=True)
-class _ResolvedSavGol:
-    runner: SavGolCallable
+class _ResolvedTool:
+    runner: ToolCallable
     prediction_type: type[object]
     failure_type: type[object]
     spectrum_type: type[Any]
@@ -66,8 +66,9 @@ def execute_local_run(
     tool: ToolManifest,
     selected_sample_ids: Sequence[str],
     source_npz: Path,
+    weight_files: Sequence[Path] = (),
 ) -> PredictionBundleV2 | PredictionBundleV3:
-    """Execute one complete local SavGol input set and publish it atomically."""
+    """Execute one complete verified input set and publish it atomically."""
 
     if plan.dry_run:
         raise ValueError("dry-run plans cannot execute")
@@ -86,9 +87,7 @@ def execute_local_run(
     source_bytes = source_npz.read_bytes()
     source_digest = sha256(source_bytes).hexdigest()
     expected_asset_digest = (
-        plan.data_digest
-        if isinstance(plan, RunPlanV2)
-        else plan.benchmark_asset_digest
+        plan.data_digest if isinstance(plan, RunPlanV2) else plan.benchmark_asset_digest
     )
     if source_digest != expected_asset_digest:
         raise ValueError(
@@ -99,18 +98,13 @@ def execute_local_run(
         selected,
         require_canonical_benchmark=not isinstance(plan, RunPlanV2),
     )
-    resolved_entrypoint = _verify_savgol_identity(plan, tool)
-    resolved_tool = _load_savgol_callable(resolved_entrypoint)
+    resolved_entrypoint = _verify_tool_identity(plan, tool, weight_files)
+    resolved_tool = _load_tool_callable(resolved_entrypoint, tool.id)
     try:
         spectra = _load_selected_spectra(
             inference_source, selected, resolved_tool.spectrum_type
         )
-        window_length, polyorder = _savgol_parameters(plan)
-        results = resolved_tool.runner(
-            spectra,
-            window_length=window_length,
-            polyorder=polyorder,
-        )
+        results = resolved_tool.runner(spectra, **_tool_kwargs(plan, weight_files))
         _validate_results(selected, results, resolved_tool)
 
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -150,17 +144,29 @@ def _validate_selection(
     return selected
 
 
-def _verify_savgol_identity(
-    plan: RunPlanType, tool: ToolManifest
+def _verify_tool_identity(
+    plan: RunPlanType,
+    tool: ToolManifest,
+    weight_files: Sequence[Path],
 ) -> ResolvedEntrypoint:
-    if plan.tool_id != "savgol" or tool.id != "savgol":
-        raise ValueError("M0 local execution supports only the savgol tool")
-    if tool.entrypoint != "hyperspectrum.plugins.xas.baselines:savgol_filter":
-        raise ValueError("M0 local execution requires the canonical SavGol entrypoint")
+    entrypoints = {
+        "savgol": "hyperspectrum.plugins.xas.baselines:savgol_filter",
+        "xasdenoise": "hyperspectrum.adapters.xasdenoise:denoise_spectra",
+    }
+    if plan.tool_id != tool.id or tool.id not in entrypoints:
+        raise ValueError("local execution supports only registered XAS denoising tools")
+    if tool.entrypoint != entrypoints[tool.id]:
+        raise ValueError(f"local execution requires the canonical {tool.id} entrypoint")
     if plan.tool_digest != tool.tool_digest:
         raise ValueError("selected tool digest does not match the immutable plan")
-    if tool.weights.required or plan.weight_digest != "none":
-        raise ValueError("M0 SavGol execution requires no weights")
+    if tool.weights.required:
+        if len(weight_files) != 1:
+            raise ValueError("weighted tools require exactly one mounted weight asset")
+        _verify_mounted_weight(weight_files[0], tool)
+        if plan.weight_digest != tool.weights.digest:
+            raise ValueError("weight digest does not match the immutable plan")
+    elif weight_files or plan.weight_digest != "none":
+        raise ValueError("unweighted tools do not accept mounted weight assets")
     resolved = resolve_local_entrypoint(tool)
     if resolved.implementation_digest != plan.implementation_digest:
         raise ValueError("implementation digest does not match the immutable plan")
@@ -176,7 +182,31 @@ def _verify_savgol_identity(
     return resolved
 
 
-def _load_savgol_callable(resolved: ResolvedEntrypoint) -> _ResolvedSavGol:
+def _verify_mounted_weight(path: Path, tool: ToolManifest) -> None:
+    expected_size = tool.weights.size_bytes
+    expected_digest = tool.weights.digest
+    if expected_size is None or expected_digest is None:
+        raise ValueError("weighted tool manifest has incomplete asset identity")
+    try:
+        observed_size = path.stat().st_size
+    except OSError as error:
+        raise ValueError(f"cannot stat mounted weight asset: {error}") from error
+    if observed_size != expected_size:
+        raise ValueError(
+            f"mounted weight size mismatch: expected {expected_size}, got {observed_size}"
+        )
+    hasher = sha256()
+    try:
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                hasher.update(chunk)
+    except OSError as error:
+        raise ValueError(f"cannot read mounted weight asset: {error}") from error
+    if hasher.hexdigest() != expected_digest:
+        raise ValueError("mounted weight SHA-256 mismatch")
+
+
+def _load_tool_callable(resolved: ResolvedEntrypoint, tool_id: str) -> _ResolvedTool:
     sources = {module.module_name: module for module in resolved.modules}
     execution_id = uuid4().hex
     module_cache: dict[str, ModuleType] = {}
@@ -230,18 +260,23 @@ def _load_savgol_callable(resolved: ResolvedEntrypoint) -> _ResolvedSavGol:
         module = load_module(resolved.module_name)
         runner = getattr(module, resolved.object_name, None)
         if not callable(runner):
-            raise TypeError("resolved SavGol entrypoint is not callable")
-        prediction_type = getattr(module, "BaselinePrediction", None)
-        failure_type = getattr(module, "BaselineFailure", None)
+            raise TypeError(f"resolved {tool_id} entrypoint is not callable")
+        result_names = {
+            "savgol": ("BaselinePrediction", "BaselineFailure"),
+            "xasdenoise": ("XASDenoisePrediction", "XASDenoiseFailure"),
+        }
+        prediction_name, failure_name = result_names[tool_id]
+        prediction_type = getattr(module, prediction_name, None)
+        failure_type = getattr(module, failure_name, None)
         spectrum_type = getattr(module, "XASSpectrum", None)
         if (
             not isinstance(prediction_type, type)
             or not isinstance(failure_type, type)
             or not isinstance(spectrum_type, type)
         ):
-            raise TypeError("SavGol source does not define its result types")
-        return _ResolvedSavGol(
-            runner=cast(SavGolCallable, runner),
+            raise TypeError(f"{tool_id} source does not define its result types")
+        return _ResolvedTool(
+            runner=cast(ToolCallable, runner),
             prediction_type=prediction_type,
             failure_type=failure_type,
             spectrum_type=spectrum_type,
@@ -419,10 +454,24 @@ def _savgol_parameters(plan: RunPlanType) -> tuple[int, int]:
     return window_length, polyorder
 
 
+def _tool_kwargs(plan: RunPlanType, weight_files: Sequence[Path]) -> dict[str, object]:
+    if plan.tool_id == "savgol":
+        window_length, polyorder = _savgol_parameters(plan)
+        return {"window_length": window_length, "polyorder": polyorder}
+    if plan.tool_id == "xasdenoise":
+        if len(weight_files) != 1:
+            raise ValueError("XASDenoise requires exactly one mounted weight asset")
+        return {
+            "weights_path": weight_files[0],
+            "device": plan.parameters["device"],
+        }
+    raise ValueError("unsupported local tool")
+
+
 def _validate_results(
     selected: tuple[str, ...],
     results: Sequence[object],
-    resolved_tool: _ResolvedSavGol,
+    resolved_tool: _ResolvedTool,
 ) -> None:
     if len(results) != len(selected):
         raise RuntimeError("tool did not return one result per selected sample")
@@ -445,7 +494,7 @@ def _write_run(
     plan: RunPlanType,
     selected: tuple[str, ...],
     results: Sequence[object],
-    resolved_tool: _ResolvedSavGol,
+    resolved_tool: _ResolvedTool,
 ) -> PredictionBundleV2 | PredictionBundleV3:
     arrays_directory = directory / "arrays"
     arrays_directory.mkdir()
@@ -484,6 +533,8 @@ def _write_run(
         "data_origin": plan.data_origin,
         "parameters": plan.model_dump(mode="json")["parameters"],
     }
+    model_runtime = _model_runtime_provenance(plan, results, resolved_tool)
+    common_provenance.update(model_runtime)
     if isinstance(plan, RunPlanV2):
         bundle: PredictionBundleV2 | PredictionBundleV3 = (
             PredictionBundleV2.model_validate(
@@ -522,9 +573,7 @@ def _write_run(
         )
         run_identity = {
             "source_dataset_digest": plan.source_dataset_digest,
-            "source_content_manifest_digest": (
-                plan.source_content_manifest_digest
-            ),
+            "source_content_manifest_digest": (plan.source_content_manifest_digest),
             "benchmark_asset_digest": plan.benchmark_asset_digest,
         }
         run_schema_version = "hyperspectrum-run/v2"
@@ -546,9 +595,68 @@ def _write_run(
             "weight_digest": plan.weight_digest,
             **run_identity,
             "environment_digest": plan.environment_digest,
+            **model_runtime,
         },
     )
     return bundle
+
+
+def _model_runtime_provenance(
+    plan: RunPlanType,
+    results: Sequence[object],
+    resolved_tool: _ResolvedTool,
+) -> dict[str, object]:
+    if plan.tool_id != "xasdenoise":
+        return {}
+    if isinstance(plan, RunPlanV2):
+        raise TypeError("XASDenoise execution requires a v3 run plan")
+    predictions = [
+        cast(Any, result)
+        for result in results
+        if isinstance(result, resolved_tool.prediction_type)
+    ]
+    states = [
+        {
+            "sample_id": prediction.spectrum.sample_id,
+            "state_digest": prediction.preprocessing_state.digest,
+            **prediction.preprocessing_state.to_dict(),
+        }
+        for prediction in predictions
+    ]
+    observed_devices = {prediction.device for prediction in predictions}
+    if len(observed_devices) > 1:
+        raise RuntimeError("XASDenoise results disagree on the execution device")
+    actual_device = (
+        next(iter(observed_devices))
+        if observed_devices
+        else str(plan.parameters["device"])
+    )
+    torch_versions = {
+        prediction.torch_version
+        for prediction in predictions
+        if prediction.torch_version is not None
+    }
+    if len(torch_versions) > 1:
+        raise RuntimeError("XASDenoise results disagree on the PyTorch version")
+    preprocessing = {
+        "schema_version": "hyperspectrum-xasdenoise-step-baseline/v1",
+        "method": "symmetric_tanh_step",
+        "inverse": "add_same_fitted_baseline",
+        "normalization_method": "identity_raw",
+        "model_normalization_method": None,
+        "native_output_semantics": (
+            "model residual plus the exact fitted baseline in the input signal unit"
+        ),
+        "states": states,
+    }
+    return {
+        "preprocessing": preprocessing,
+        "runtime": {
+            "requested_device": plan.parameters["device"],
+            "device": actual_device,
+            **({"torch_version": next(iter(torch_versions))} if torch_versions else {}),
+        },
+    }
 
 
 def _write_prediction_array(

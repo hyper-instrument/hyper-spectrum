@@ -354,7 +354,16 @@ def test_tool_matching_reports_selected_and_blocked_evidence() -> None:
     assert isinstance(result, dict)
     assert [match["id"] for match in result["matches"]] == ["savgol"]  # type: ignore[index]
     blocked = {item["id"]: item for item in result["blocked"]}  # type: ignore[index]
-    assert "weights-required-missing" in blocked["xasdenoise"]["reasons"]
+    xasdenoise = blocked["xasdenoise"]
+    assert "weights-unverified" in xasdenoise["reasons"]
+    assert xasdenoise["manifest"]["source"]["commit"] == (
+        "bda749ee956f9e02acc6995f238d759682ee2ca8"
+    )
+    assert xasdenoise["manifest"]["weights"]["asset_id"] == "zenodo-17434349"
+    assert xasdenoise["manifest"]["weights"]["size_bytes"] == 780409
+    assert xasdenoise["manifest"]["weights"]["digest"] == (
+        "09620ee9ea0c96585f534d76ce42aa72edf2cf71e481f5737e43e93116e24160"
+    )
 
 
 def test_tool_matching_delegates_positive_selection_to_registry_contract(
@@ -387,6 +396,34 @@ def test_tool_matching_delegates_positive_selection_to_registry_contract(
         cpu=1, memory_gb=1, gpu_available=False
     )
     assert response.result["matches"][0]["id"] == "savgol"  # type: ignore[index]
+
+
+def test_mounted_xas_weight_is_verified_before_availability(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from hyperspectrum.adapters import xasdenoise as adapter_module
+
+    weight = tmp_path / "mounted.pth"
+    weight.write_bytes(b"test-only")
+    observed: list[Path] = []
+
+    def verified(path: Path) -> object:
+        observed.append(path)
+        return object()
+
+    monkeypatch.setattr(adapter_module, "verify_weight_asset", verified)
+
+    availability = agent._availability_with_mounted_weights(
+        agent._load_tool("xasdenoise"), (weight,)
+    )
+
+    assert availability.available is True
+    assert observed == [weight]
+
+
+def test_xas_availability_requires_exactly_one_mounted_weight(tmp_path: Path) -> None:
+    with pytest.raises(agent.AgentMissingAssetError, match="exactly one"):
+        agent._availability_with_mounted_weights(agent._load_tool("xasdenoise"), ())
 
 
 def test_missing_json_input_is_a_stable_missing_asset_error(tmp_path: Path) -> None:
@@ -574,12 +611,14 @@ def test_local_service_uses_public_executor(
         tool: object,
         selected_sample_ids: tuple[str, ...],
         source_npz: Path,
+        weight_files: tuple[Path, ...],
     ) -> PredictionBundle:
         observed.update(
             plan=plan,
             tool=tool,
             selected_sample_ids=selected_sample_ids,
             source_npz=source_npz,
+            weight_files=weight_files,
         )
         return Bundle()  # type: ignore[return-value]
 
@@ -599,6 +638,7 @@ def test_local_service_uses_public_executor(
     }
     assert observed["selected_sample_ids"] == ("sample-1", "sample-2")
     assert observed["source_npz"] == source
+    assert observed["weight_files"] == ()
 
 
 def test_local_service_clearly_refuses_unbound_legacy_v1_plan(tmp_path: Path) -> None:

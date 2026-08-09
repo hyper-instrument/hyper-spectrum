@@ -28,12 +28,14 @@ Invertibility: TypeAlias = Literal["exact", "approximate", "none"]
 Split: TypeAlias = Literal["train", "val", "test"]
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _STATE_PARAMETER_KEYS = {
+    "identity_raw": ("offset", "scale"),
     "per_spectrum_range": ("offset", "scale"),
     "total_ion_current": ("offset", "scale"),
     "complex_rms": ("offset", "scale"),
     "train_global_standard": ("mean", "scale"),
 }
 _METHOD_FIT_SCOPES: dict[str, FitScope] = {
+    "identity_raw": "per_sample",
     "per_spectrum_range": "per_sample",
     "total_ion_current": "per_sample",
     "complex_rms": "per_sample",
@@ -240,6 +242,13 @@ _REAL_DENSE_MODALITIES = frozenset(
 )
 _DEFAULT_DEFINITIONS = (
     NormalizationDefinition(
+        "identity_raw",
+        "per_sample",
+        "exact",
+        _REAL_DENSE_MODALITIES,
+        frozenset({"dense"}),
+    ),
+    NormalizationDefinition(
         "per_spectrum_range",
         "per_sample",
         "exact",
@@ -314,6 +323,8 @@ def _derive_per_sample_state(
     definition: NormalizationDefinition, sample: SpectrumSample
 ) -> NormalizationState:
     values = sample.signal[sample.valid_mask]
+    if definition.name == "identity_raw":
+        return _state(definition, sample, parameters={"offset": 0.0, "scale": 1.0})
     if definition.name == "per_spectrum_range":
         minimum = float(np.min(values))
         scale = float(np.max(values) - minimum)
