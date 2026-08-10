@@ -129,6 +129,23 @@ For the fixed-weight adapter, replace `--tool-id savgol` with
 explicit fallback policy `--device auto` during planning. An explicit CUDA
 request fails when CUDA is unavailable; only `auto` may select CPU.
 
+## The ACE candidate container
+
+`docker/ace-candidate/` builds the traditional-XAS-denoising candidate image
+from this repository:
+
+```bash
+docker build -f docker/ace-candidate/Dockerfile -t hyperspectrum-xas-candidate .
+```
+
+ACE Benchmark has the same recipe and builds the same image; the only difference
+is where the runtime comes from — the build context here, a staged tarball there
+— so a build service handed this repository's URL needs nothing else. The
+adapter files under `docker/ace-candidate/vendor/` are ACE's, copied byte for
+byte and pinned by SHA-256. Read `docker/ace-candidate/VENDORED.md` before
+touching any of them: they are edited upstream and re-vendored, never edited
+here.
+
 ## Wire compatibility
 
 - New planning emits `hyperspectrum-run-plan/v3`. Every v3 plan binds an exact,
