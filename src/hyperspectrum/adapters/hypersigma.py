@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
+import importlib.machinery
 import importlib.util
 import json
 import sys
@@ -28,7 +30,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from types import MappingProxyType, ModuleType
+from types import CodeType, MappingProxyType, ModuleType
 from typing import Any, BinaryIO, Literal, Protocol, cast
 
 import numpy as np
@@ -161,6 +163,33 @@ class HyperSIGMARuntimeIdentity:
         )
 
 
+class _VerifiedSourceLoader(importlib.machinery.SourceFileLoader):
+    """Compile the verified source bytes without reading or writing ``pyc`` files."""
+
+    def __init__(
+        self,
+        fullname: str,
+        path: str,
+        *,
+        relative_path: str,
+        expected_sha256: str,
+    ) -> None:
+        super().__init__(fullname, path)
+        self._relative_path = relative_path
+        self._expected_sha256 = expected_sha256
+
+    def get_code(self, fullname: str) -> CodeType:
+        source_path = self.get_filename(fullname)
+        source_bytes = self.get_data(source_path)
+        actual_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        if actual_sha256 != self._expected_sha256:
+            raise ValueError(
+                f"source SHA-256 mismatch at execution for {self._relative_path}: "
+                f"expected {self._expected_sha256}, actual {actual_sha256}"
+            )
+        return self.source_to_code(source_bytes, source_path)
+
+
 def _load_verified_modules(
     verified: VerifiedSourceTree,
 ) -> tuple[dict[str, ModuleType], tuple[str, ...]]:
@@ -175,8 +204,17 @@ def _load_verified_modules(
     try:
         for stem in _UPSTREAM_STEMS:
             qualified = f"{package_name}.{stem}"
+            relative_path = f"ImageDenoising/models/hypersigma/{stem}.py"
+            source_path = verified.root / relative_path
             spec = importlib.util.spec_from_file_location(
-                qualified, model_dir / f"{stem}.py"
+                qualified,
+                source_path,
+                loader=_VerifiedSourceLoader(
+                    qualified,
+                    str(source_path),
+                    relative_path=relative_path,
+                    expected_sha256=verified.file_sha256[relative_path],
+                ),
             )
             if spec is None or spec.loader is None:
                 raise ImportError(f"cannot create import spec for verified {stem}.py")
@@ -397,11 +435,21 @@ def load_verified_state_dict(
     try:
         with path.open("rb") as stream:
             identity = verify_weight_stream(stream, contract, source_path=path)
-            loaded = torch_module.load(
-                stream,
-                map_location="cpu",
-                weights_only=True,
-            )
+            numpy_multiarray = importlib.import_module("numpy._core.multiarray")
+            safe_globals: list[object] = [
+                (
+                    numpy_multiarray.scalar,
+                    "numpy.core.multiarray.scalar",
+                ),
+                np.dtype,
+                type(np.dtype(np.float64)),
+            ]
+            with torch_module.serialization.safe_globals(safe_globals):
+                loaded = torch_module.load(
+                    stream,
+                    map_location="cpu",
+                    weights_only=True,
+                )
     except OSError as error:
         raise ValueError(f"cannot read weight asset: {error}") from error
     if not isinstance(loaded, Mapping):

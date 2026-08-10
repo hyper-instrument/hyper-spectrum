@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import sys
 from pathlib import Path
@@ -42,10 +43,34 @@ from hyperspectrum.denoising import (
 )
 from hyperspectrum.denoising.model import CanonicalDenoisingInput
 
+_IMPORT_MODULE = importlib.import_module
+
+
+class FakeSafeGlobalsContext:
+    def __init__(self, serialization: FakeSerialization) -> None:
+        self.serialization = serialization
+
+    def __enter__(self) -> None:
+        self.serialization.active = True
+
+    def __exit__(self, *args: object) -> None:
+        self.serialization.active = False
+
+
+class FakeSerialization:
+    def __init__(self) -> None:
+        self.active = False
+        self.allowlist: list[object] = []
+
+    def safe_globals(self, allowlist: list[object]) -> FakeSafeGlobalsContext:
+        self.allowlist = allowlist
+        return FakeSafeGlobalsContext(self)
+
 
 class FakeTorch:
     def __init__(self, loaded: object | None = None) -> None:
         self.calls: list[tuple[BinaryIO, str, bool]] = []
+        self.serialization = FakeSerialization()
         self.loaded = (
             {"net": {"layer.weight": object()}} if loaded is None else loaded
         )
@@ -61,6 +86,30 @@ class FakeTorch:
         assert not stream.closed
         self.calls.append((stream, map_location, weights_only))
         return self.loaded
+
+
+class FakeNumPyScalarTorch(FakeTorch):
+    def load(
+        self,
+        stream: BinaryIO,
+        *,
+        map_location: str,
+        weights_only: bool,
+    ) -> object:
+        legacy_names = {
+            entry[1]
+            for entry in self.serialization.allowlist
+            if isinstance(entry, tuple) and len(entry) == 2
+        }
+        if not self.serialization.active:
+            raise RuntimeError("NumPy checkpoint global was not scoped")
+        if "numpy.core.multiarray.scalar" not in legacy_names:
+            raise RuntimeError("legacy NumPy scalar global was not allowlisted")
+        if np.dtype not in self.serialization.allowlist:
+            raise RuntimeError("NumPy dtype global was not allowlisted")
+        return super().load(
+            stream, map_location=map_location, weights_only=weights_only
+        )
 
 
 def small_contract(payload: bytes) -> WeightAssetContract:
@@ -444,6 +493,24 @@ def test_load_uses_a_verified_open_descriptor(tmp_path: Path) -> None:
     assert fake_torch.calls[0][0].closed
 
 
+def test_load_scopes_the_checkpoint_numpy_allowlist(tmp_path: Path) -> None:
+    # Break caught: the pinned checkpoints contain a legacy NumPy scalar, which
+    # safe torch loading rejects unless its narrow compatibility globals are
+    # allowlisted for this one deserialization operation.
+    payload = b"safe fake checkpoint with a NumPy scalar"
+    path = tmp_path / "weight.pth"
+    path.write_bytes(payload)
+    fake_torch = FakeNumPyScalarTorch()
+
+    state, _ = load_verified_state_dict(
+        path, small_contract(payload), fake_torch
+    )
+
+    assert tuple(state) == ("layer.weight",)
+    assert fake_torch.calls[0][2] is True
+    assert fake_torch.serialization.active is False
+
+
 def test_digest_mismatch_stops_before_torch(tmp_path: Path) -> None:
     # Break caught: untrusted checkpoint bytes could reach torch.load before
     # their declared SHA-256 identity is proven.
@@ -716,7 +783,12 @@ def test_verified_module_loader_uses_an_isolated_temporary_namespace(
     verified = VerifiedSourceTree(
         root=tmp_path.resolve(),
         commit=HYPERSIGMA_SOURCE_COMMIT,
-        file_sha256={},
+        file_sha256={
+            f"ImageDenoising/models/hypersigma/{path.name}": hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+            for path in model_dir.glob("*.py")
+        },
     )
     path_before = list(sys.path)
     modules_before = set(sys.modules)
@@ -727,6 +799,54 @@ def test_verified_module_loader_uses_an_isolated_temporary_namespace(
     assert sys.path == path_before
     assert set(sys.modules) == modules_before
     assert not any(name.startswith("_hypersigma_verified_") for name in sys.modules)
+    assert not (model_dir / "__pycache__").exists()
+
+
+def test_verified_module_loader_rehashes_the_bytes_it_executes(tmp_path: Path) -> None:
+    # Break caught: verified source files could be replaced after the initial
+    # scan and the loader could execute different, unverified bytes by pathname.
+    model_dir = tmp_path / "ImageDenoising/models/hypersigma"
+    model_dir.mkdir(parents=True)
+    sources = {
+        "Spatial.py": (
+            "class SpatialVisionTransformer:\n"
+            "    def init_weights(self, path):\n"
+            "        raise AssertionError(path)\n"
+        ),
+        "Spectral.py": (
+            "class SpectralVisionTransformer:\n"
+            "    def init_weights(self, path):\n"
+            "        raise AssertionError(path)\n"
+        ),
+        "Spatial_route.py": "ROUTE = 'spatial'\n",
+        "Spectral_route.py": "ROUTE = 'spectral'\n",
+        "model.py": (
+            "from .Spatial import SpatialVisionTransformer\n"
+            "from .Spectral import SpectralVisionTransformer\n"
+            "def spat_vit_b_rvsa():\n"
+            "    SpatialVisionTransformer().init_weights('/private/spatial.pth')\n"
+            "    SpectralVisionTransformer().init_weights('/private/spectral.pth')\n"
+            "    return {'official': 'model'}\n"
+        ),
+    }
+    expected: dict[str, str] = {}
+    for filename, source in sources.items():
+        relative = f"ImageDenoising/models/hypersigma/{filename}"
+        (model_dir / filename).write_text(source, encoding="utf-8")
+        expected[relative] = hashlib.sha256(source.encode()).hexdigest()
+    verified = verify_source_tree(tmp_path, expected_files=expected)
+    marker = tmp_path / "tampered-source-executed"
+    (model_dir / "Spatial_route.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('executed')\n"
+        "ROUTE = 'tampered'\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"source SHA-256 mismatch.*Spatial_route\.py"):
+        _build_official_model(verified)
+
+    assert not marker.exists()
 
 
 def test_torch_runtime_loads_strict_eval_no_grad_and_predicts_inference_only(
@@ -760,7 +880,7 @@ def test_torch_runtime_loads_strict_eval_no_grad_and_predicts_inference_only(
     monkeypatch.setattr(
         adapter_module.importlib,
         "import_module",
-        lambda name: torch_module if name == "torch" else None,
+        lambda name: torch_module if name == "torch" else _IMPORT_MODULE(name),
     )
 
     runtime = _TorchRuntime(
@@ -830,7 +950,7 @@ def test_torch_runtime_rejects_reported_incompatible_keys(
     monkeypatch.setattr(
         adapter_module.importlib,
         "import_module",
-        lambda name: torch_module if name == "torch" else None,
+        lambda name: torch_module if name == "torch" else _IMPORT_MODULE(name),
     )
 
     with pytest.raises(ValueError, match="incompatible keys"):
