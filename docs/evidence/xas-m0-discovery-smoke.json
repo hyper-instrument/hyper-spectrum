@@ -1,0 +1,565 @@
+{
+  "schema_version": "hyperspectrum-xas-m0-discovery-smoke/v1",
+  "document_kind": "discovery_smoke_observation",
+  "not_a_selection": "No scoreable candidate was observed, so no hyperspectrum-xas-m0-selection instance may exist. The M0 plan forbids writing docs/evidence/xas-m0-selection.json unless every success field is observed.",
+  "query": {
+    "timestamp": "2026-08-10T04:52:44Z",
+    "profile": "volcano",
+    "client_version": "hd-0.11.2",
+    "search_contract": "search QUERY --ilike --json --limit 20 --page N",
+    "source_queries": [
+      "XAS",
+      "XANES",
+      "EXAFS",
+      "absorption edge"
+    ]
+  },
+  "runtime": {
+    "host_class": "coordinating-workstation",
+    "host_class_note": "The M0 selection schema requires host_class 5090. The 5090 could not be used: its volcano profile authorization is expired or revoked and hyperspectrum is not installed there. Discovery is catalog-read-only, so the live evidence is host-independent.",
+    "hyperspectrum_commit": "ab11693cc3bf1499a4eb3f1e541012a9c7b6b0cb",
+    "python_version": "3.12.13",
+    "hyperdata_client_binary": "hyd"
+  },
+  "connectivity": {
+    "state": "restored",
+    "prior_state": "2026-08-08 catalog request timed out; M0 recorded Blocked",
+    "http_root_status": 200,
+    "http_root_seconds": 0.87,
+    "http_api_unauthenticated_status": 401,
+    "http_api_unauthenticated_seconds": 0.57,
+    "search_round_trip_seconds_range": [
+      2.7,
+      4.6
+    ]
+  },
+  "identity": {
+    "method": "hyd --profile volcano whoami",
+    "server_confirmed": true,
+    "username_masked": "vol_***",
+    "exit_code": 0,
+    "note": "Identity was read from masked CLI output only. No profile file, authorization value, or endpoint secret was read or recorded."
+  },
+  "search_recall": [
+    {
+      "query": "XAS",
+      "mode": "ilike",
+      "total": 7,
+      "records_read": 7,
+      "pages_read": 1,
+      "dataset_codes": [
+        "zenodo-3473148",
+        "zenodo-3380560",
+        "zenodo-17915983",
+        "zenodo-17483574",
+        "zenodo-15498570",
+        "zenodo-10070373",
+        "zenodo-18142209"
+      ],
+      "domain_term_hits": [
+        "zenodo-15498570",
+        "zenodo-18142209"
+      ],
+      "adjacent_modality_hits": [],
+      "substring_false_positives": [
+        "zenodo-3473148",
+        "zenodo-3380560",
+        "zenodo-17915983",
+        "zenodo-17483574",
+        "zenodo-10070373"
+      ]
+    },
+    {
+      "query": "XANES",
+      "mode": "ilike",
+      "total": 3,
+      "records_read": 3,
+      "pages_read": 1,
+      "dataset_codes": [
+        "zenodo-16892323",
+        "zenodo-14966054",
+        "zenodo-10606662"
+      ],
+      "domain_term_hits": [
+        "zenodo-16892323",
+        "zenodo-10606662"
+      ],
+      "adjacent_modality_hits": [],
+      "substring_false_positives": [
+        "zenodo-14966054"
+      ]
+    },
+    {
+      "query": "EXAFS",
+      "mode": "ilike",
+      "total": 5,
+      "records_read": 5,
+      "pages_read": 1,
+      "dataset_codes": [
+        "zenodo-16610131",
+        "zenodo-15706590",
+        "zenodo-15706543",
+        "zenodo-15706518",
+        "zenodo-154112"
+      ],
+      "domain_term_hits": [
+        "zenodo-16610131"
+      ],
+      "adjacent_modality_hits": [
+        "zenodo-15706590",
+        "zenodo-15706543",
+        "zenodo-15706518",
+        "zenodo-154112"
+      ],
+      "substring_false_positives": []
+    },
+    {
+      "query": "absorption edge",
+      "mode": "ilike",
+      "total": 0,
+      "records_read": 0,
+      "pages_read": 1,
+      "dataset_codes": [],
+      "domain_term_hits": [],
+      "adjacent_modality_hits": [],
+      "substring_false_positives": []
+    }
+  ],
+  "term_recall_finding": {
+    "bare_substring_recall_is_unsafe": true,
+    "observed": "Postgres ILIKE recall is pure substring matching over dataset titles/codes. 6 of the 15 unique hits are substring coincidences with no X-ray absorption content.",
+    "examples": {
+      "XAS": "matches Texas (4 datasets) and hexasomes (1 dataset)",
+      "XANES": "matches siloxanes (1 dataset)",
+      "EXAFS": "matches NEXAFS (4 datasets) - scientifically adjacent, but a different measurement, not EXAFS"
+    },
+    "consequence": "Term recall must be combined with file-content evidence (energy axis, unit, parser status) before any candidate is admitted. M0 discovery already refuses to admit on name alone."
+  },
+  "preferred_candidate_absence": {
+    "dataset_code": "zenodo-17434349",
+    "design_doc_role": "preferred candidate named in the XAS agent design",
+    "queries_run": [
+      "zenodo-17434349",
+      "17434349"
+    ],
+    "total_hits": 0,
+    "conclusion": "Not present in the volcano catalog. Discovery therefore had to select from live query evidence, exactly as the M0 design requires."
+  },
+  "candidates": [
+    {
+      "dataset_code": "zenodo-3473148",
+      "title": "Assessing the Impacts of Super Storm Flooding in the Transportation Infrastructure – Case Study: San Antonio, Texas",
+      "source_queries": [
+        "XAS"
+      ],
+      "term_match_kind": "substring_false_positive",
+      "term_match_reason": "'Texas' contains 'xas'; storm-flooding transportation study",
+      "primary_format": "xlsx",
+      "file_count": 17,
+      "parsed_file_count": 17,
+      "catalog_dataset_version": null,
+      "catalog_content_digest": null,
+      "readiness_score": 0,
+      "verdict": "blocked",
+      "reason_codes": [
+        "xas_access_unavailable",
+        "xas_energy_axis_invalid"
+      ]
+    },
+    {
+      "dataset_code": "zenodo-3380560",
+      "title": "Coastal Bridges under Hurricane Stresses along the Texas and Louisiana Coast",
+      "source_queries": [
+        "XAS"
+      ],
+      "term_match_kind": "substring_false_positive",
+      "term_match_reason": "'Texas' contains 'xas'; coastal bridge hurricane study",
+      "primary_format": "odb",
+      "file_count": 37,
+      "parsed_file_count": 13,
+      "catalog_dataset_version": null,
+      "catalog_content_digest": null,
+      "readiness_score": 0,
+      "verdict": "blocked",
+      "reason_codes": [
+        "xas_access_unavailable",
+        "xas_energy_axis_invalid"
+      ]
+    },
+    {
+      "dataset_code": "zenodo-17915983",
+      "title": "COMMAS 125m West Texas Thunderstorm Simulations",
+      "source_queries": [
+        "XAS"
+      ],
+      "term_match_kind": "substring_false_positive",
+      "term_match_reason": "'Texas' contains 'xas'; thunderstorm simulation",
+      "primary_format": "nc",
+      "file_count": 2,
+      "parsed_file_count": 2,
+      "catalog_dataset_version": null,
+      "catalog_content_digest": null,
+      "readiness_score": 0,
+      "verdict": "blocked",
+      "reason_codes": [
+        "xas_access_unavailable",
+        "xas_energy_axis_invalid"
+      ]
+    },
+    {
+      "dataset_code": "zenodo-17483574",
+      "title": "Recognition and remodelling of nucleosomes and hexasomes by the human INO80 complex",
+      "source_queries": [
+        "XAS"
+      ],
+      "term_match_kind": "substring_false_positive",
+      "term_match_reason": "'hexasomes' contains 'xas'; cryo-EM nucleosome study",
+      "primary_format": "5281",
+      "file_count": 11,
+      "parsed_file_count": 0,
+      "catalog_dataset_version": null,
+      "catalog_content_digest": null,
+      "readiness_score": 0,
+      "verdict": "blocked",
+      "reason_codes": [
+        "xas_access_unavailable",
+        "xas_energy_axis_invalid"
+      ]
+    },
+    {
+      "dataset_code": "zenodo-15498570",
+      "title": "Data of article: HERFD-XAS evidence for an octahedrally coordinated CoSn-polysulfide precursor as a probe for the mechanism of pyrite formation",
+      "source_queries": [
+        "XAS"
+      ],
+      "term_match_kind": "domain_term",
+      "term_match_reason": "HERFD-XAS named in title; hard X-ray absorption",
+      "primary_format": "dat",
+      "file_count": 109,
+      "parsed_file_count": 108,
+      "catalog_dataset_version": null,
+      "catalog_content_digest": null,
+      "readiness_score": 0,
+      "verdict": "blocked",
+      "reason_codes": [
+        "xas_access_unavailable",
+        "xas_energy_axis_invalid"
+      ]
+    },
+    {
+      "dataset_code": "zenodo-10070373",
+      "title": "Hydrodynamic field data near Galveston, Texas wetland edges to help assess storm impacts and erosion",
+      "source_queries": [
+        "XAS"
+      ],
+      "term_match_kind": "substring_false_positive",
+      "term_match_reason": "'Texas' contains 'xas'; hydrodynamic wetland field data",
+      "primary_format": "txt",
+      "file_count": 25,
+      "parsed_file_count": 0,
+      "catalog_dataset_version": null,
+      "catalog_content_digest": null,
+      "readiness_score": 0,
+      "verdict": "blocked",
+      "reason_codes": [
+        "xas_access_unavailable",
+        "xas_energy_axis_invalid"
+      ]
+    },
+    {
+      "dataset_code": "zenodo-18142209",
+      "title": "基于EELS和XAS谱的铜氧化态预测数据集",
+      "source_queries": [
+        "XAS"
+      ],
+      "term_match_kind": "domain_term",
+      "term_match_reason": "EELS and XAS spectra named in title",
+      "primary_format": "json",
+      "file_count": 1,
+      "parsed_file_count": 1,
+      "catalog_dataset_version": null,
+      "catalog_content_digest": null,
+      "readiness_score": 0,
+      "verdict": "blocked",
+      "reason_codes": [
+        "xas_access_unavailable",
+        "xas_energy_axis_invalid"
+      ]
+    },
+    {
+      "dataset_code": "zenodo-16892323",
+      "title": "Raw data for: \"A Snapshot Of Flavin-Conjugated Pt Anticancer Agents: Pt(IV)-To-Pt(II) Reduction Revealed By X-Ray Fluorescence Imaging And XANES\"",
+      "source_queries": [
+        "XANES"
+      ],
+      "term_match_kind": "domain_term",
+      "term_match_reason": "XANES named in title",
+      "primary_format": "rar",
+      "file_count": 4,
+      "parsed_file_count": 4,
+      "catalog_dataset_version": null,
+      "catalog_content_digest": null,
+      "readiness_score": 0,
+      "verdict": "blocked",
+      "reason_codes": [
+        "xas_access_unavailable",
+        "xas_energy_axis_invalid"
+      ]
+    },
+    {
+      "dataset_code": "zenodo-14966054",
+      "title": "Dataset of report: A221 Validation of the protocol developed in A2.1.4 by demonstrating its applicability for siloxanes",
+      "source_queries": [
+        "XANES"
+      ],
+      "term_match_kind": "substring_false_positive",
+      "term_match_reason": "'siloxanes' contains 'xanes'; siloxane protocol validation",
+      "primary_format": "xlsx",
+      "file_count": 1,
+      "parsed_file_count": 1,
+      "catalog_dataset_version": null,
+      "catalog_content_digest": null,
+      "readiness_score": 0,
+      "verdict": "blocked",
+      "reason_codes": [
+        "xas_access_unavailable",
+        "xas_energy_axis_invalid"
+      ]
+    },
+    {
+      "dataset_code": "zenodo-10606662",
+      "title": "In-situ XANES data for the calcination of Ca(II)/Ce(IV)-doped LaPO4 monazite",
+      "source_queries": [
+        "XANES"
+      ],
+      "term_match_kind": "domain_term",
+      "term_match_reason": "in-situ XANES named in title",
+      "primary_format": "dat",
+      "file_count": 495,
+      "parsed_file_count": 491,
+      "catalog_dataset_version": null,
+      "catalog_content_digest": null,
+      "readiness_score": 0,
+      "verdict": "blocked",
+      "reason_codes": [
+        "xas_access_unavailable",
+        "xas_energy_axis_invalid"
+      ]
+    },
+    {
+      "dataset_code": "zenodo-16610131",
+      "title": "In situ FTIR, EXAFS and HR-STEM data for Pd/TiO2 samples under red-ox conditions",
+      "source_queries": [
+        "EXAFS"
+      ],
+      "term_match_kind": "domain_term",
+      "term_match_reason": "EXAFS named in title",
+      "primary_format": "mp4",
+      "file_count": 11,
+      "parsed_file_count": 11,
+      "catalog_dataset_version": null,
+      "catalog_content_digest": null,
+      "readiness_score": 0,
+      "verdict": "blocked",
+      "reason_codes": [
+        "xas_access_unavailable",
+        "xas_energy_axis_invalid"
+      ]
+    },
+    {
+      "dataset_code": "zenodo-15706590",
+      "title": "Dataset for paper: \"An electrochemical flow cell for operando XPS and NEXAFS investigation of solid–liquid interfaces\"",
+      "source_queries": [
+        "EXAFS"
+      ],
+      "term_match_kind": "adjacent_modality",
+      "term_match_reason": "'NEXAFS' matched via the 'EXAFS' substring; soft X-ray near-edge, not EXAFS",
+      "primary_format": "xlsx",
+      "file_count": 1,
+      "parsed_file_count": 1,
+      "catalog_dataset_version": null,
+      "catalog_content_digest": null,
+      "readiness_score": 0,
+      "verdict": "blocked",
+      "reason_codes": [
+        "xas_access_unavailable",
+        "xas_energy_axis_invalid"
+      ]
+    },
+    {
+      "dataset_code": "zenodo-15706543",
+      "title": "Dataset for paper: \"An electrochemical flow cell for operando XPS and NEXAFS investigation of solid–liquid interfaces\"",
+      "source_queries": [
+        "EXAFS"
+      ],
+      "term_match_kind": "adjacent_modality",
+      "term_match_reason": "'NEXAFS' matched via the 'EXAFS' substring; soft X-ray near-edge, not EXAFS",
+      "primary_format": "xlsx",
+      "file_count": 1,
+      "parsed_file_count": 1,
+      "catalog_dataset_version": null,
+      "catalog_content_digest": null,
+      "readiness_score": 0,
+      "verdict": "blocked",
+      "reason_codes": [
+        "xas_access_unavailable",
+        "xas_energy_axis_invalid"
+      ]
+    },
+    {
+      "dataset_code": "zenodo-15706518",
+      "title": "Dataset of paper: \"VerSoX B07-B: a high-throughput XPS and ambient pressure NEXAFS beamline at Diamond Light Source\"",
+      "source_queries": [
+        "EXAFS"
+      ],
+      "term_match_kind": "adjacent_modality",
+      "term_match_reason": "'NEXAFS' matched via the 'EXAFS' substring; soft X-ray near-edge, not EXAFS",
+      "primary_format": "xlsx",
+      "file_count": 1,
+      "parsed_file_count": 1,
+      "catalog_dataset_version": null,
+      "catalog_content_digest": null,
+      "readiness_score": 0,
+      "verdict": "blocked",
+      "reason_codes": [
+        "xas_access_unavailable",
+        "xas_energy_axis_invalid"
+      ]
+    },
+    {
+      "dataset_code": "zenodo-154112",
+      "title": "Benzonitrile on Si(001). XPS, NEXAFS, and STM data. Accepted for publication in PCCP Sept. 2016",
+      "source_queries": [
+        "EXAFS"
+      ],
+      "term_match_kind": "adjacent_modality",
+      "term_match_reason": "'NEXAFS' matched via the 'EXAFS' substring; .asc corpus is the known ESRI-grid misparse trap",
+      "primary_format": "asc",
+      "file_count": 1211,
+      "parsed_file_count": 133,
+      "catalog_dataset_version": null,
+      "catalog_content_digest": null,
+      "readiness_score": 0,
+      "verdict": "blocked",
+      "reason_codes": [
+        "xas_access_unavailable",
+        "xas_energy_axis_invalid"
+      ]
+    }
+  ],
+  "selection": {
+    "selected_dataset_code": null,
+    "algorithm": "readiness_verdict_gate",
+    "outcome": "no_scoreable_candidate",
+    "reason_codes": [
+      "xas_access_unavailable",
+      "xas_energy_axis_invalid",
+      "catalog_record_lacks_version",
+      "catalog_record_lacks_content_digest"
+    ],
+    "note": "All 15 unique candidates, including the domain-term hits, returned blocked with identical reason codes. Ranking is degenerate because every readiness score is 0, so the stable sort preserves search order and the substring false positives appear first."
+  },
+  "catalog_contract_gap": {
+    "finding": "The live hyd ilike search record does not carry the fields the M0 readiness layer reads.",
+    "record_fields_present": [
+      "id",
+      "dataset_code",
+      "title",
+      "visibility",
+      "status",
+      "origin",
+      "primary_format",
+      "file_count",
+      "storage_backend",
+      "created_at",
+      "parent_dataset_id",
+      "child_count",
+      "samples",
+      "instruments",
+      "thumbnail_file_id",
+      "parsed_file_count",
+      "owner_username",
+      "fair",
+      "can_write"
+    ],
+    "record_fields_discovery_reads_but_absent": [
+      "dataset_version",
+      "content_digest",
+      "license",
+      "formats",
+      "access_status",
+      "source_kind",
+      "parser_status",
+      "axis_evidence",
+      "label_evidence",
+      "pairing_evidence"
+    ],
+    "recoverable_from_present_fields": [
+      "formats (primary_format)",
+      "access_status (visibility/status)",
+      "source_kind (origin)"
+    ],
+    "not_recoverable_from_this_endpoint": [
+      "dataset_version",
+      "content_digest",
+      "license",
+      "axis/label/pairing evidence"
+    ],
+    "consequence": "Two M0 gate conditions - a non-null dataset version and a non-null content digest - cannot be satisfied through the pinned search contract alone. A read-only per-dataset detail call, or richer search records, is required."
+  },
+  "tooling": {
+    "doctor_ready": true,
+    "doctor_checks_ready": [
+      "hyperdata_cli",
+      "python",
+      "task_contract",
+      "tool_manifests"
+    ],
+    "matched_tools": [
+      {
+        "id": "savgol",
+        "tool_digest": "d1ce4a5ad56800e0b72ad7a8f4255d232e0069c89e98fad7ba92beff1a71320a"
+      }
+    ],
+    "blocked_tools": [
+      {
+        "id": "xasdenoise",
+        "reason_codes": [
+          "license-not-allowed",
+          "distribution-not-allowed",
+          "weights-state-mismatch",
+          "cpu-insufficient",
+          "memory-insufficient",
+          "weights-unverified",
+          "input_contract_unverified"
+        ]
+      }
+    ]
+  },
+  "artifact_digests": {
+    "note": "Raw catalog responses and the raw discovery envelope are retained outside Git. Only their SHA-256 content digests are recorded here.",
+    "discovery_envelope_sha256": "ccc55ee53865e1f3bc16ad80039c97cae7748f05ed5c31b7419c134787cf22ac",
+    "search_response_sha256": {
+      "XAS": "20bcddea011c3fd55f9f296e7eb38a7ab684c3d3c8576d8df692a3ea8a63fcca",
+      "XANES": "5b93b18eac83e3466fedadf3f664927cc168e9649dd5ff888ae44874cd609896",
+      "EXAFS": "62fa207bed356be54586a92b0dfd870fadd5597b16f8e808add87107b253294c",
+      "absorption edge": "5298260893c354001c2d5e8dbf24b3b2b435c4a8a57f6268ad7014460d204983"
+    },
+    "doctor_envelope_sha256": "cbf95dcc69885899d6063306403544efb7f2709b8dbf28270f8eb188d59dc777",
+    "tools_match_envelope_sha256": "ba47832aa5b0f32b9abccd1c5b29688ecf2f4731eaa04a9d1d1916e904281af3"
+  },
+  "smoke_run": {
+    "status": "not_run",
+    "reason_codes": [
+      "no_scoreable_candidate",
+      "no_admitted_dataset"
+    ]
+  },
+  "blockers": [
+    "catalog_record_lacks_version: no live XAS record carries a dataset version",
+    "catalog_record_lacks_content_digest: no live XAS record carries a content digest",
+    "xas_access_unavailable: no live record declares an access status the readiness layer accepts",
+    "xas_energy_axis_invalid: no live record carries energy axis or unit evidence",
+    "host_class_5090_unavailable: the 5090 volcano profile authorization is expired or revoked and hyperspectrum is not installed there"
+  ]
+}
