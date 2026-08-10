@@ -167,3 +167,97 @@ scientific titles. Recorded here, not fixed here.
 No credential, authorization value, signed URL, endpoint address, private path,
 raw response body, dataset payload, or model weight is recorded in this document
 or in the evidence file.
+
+## Delta: after the wire alignment (same day, same catalog)
+
+Follow-up 1 above is done, and follow-up 4's redaction note is fixed. The
+commands were re-run against the same live `volcano` profile after
+`claude/m0-wire-alignment`; the catalog was unchanged (XAS 7/7, XANES 3/3,
+EXAFS 5/5, "absorption edge" 0/0, one page each, `complete: true`), so the
+difference below is entirely the reader, not the data.
+
+### What the extractor now derives, and what it now refuses to invent
+
+| Contract field | Source on the live wire | Result |
+| --- | --- | --- |
+| `formats` | `primary_format` (one value) | derived, with `formats_complete: false` recorded so a single primary format never reads as an exhaustive list |
+| `access_status` | `visibility` + `status` | `admitted_catalog` when the record is `active` and `public`/`internal`; a named `restricted_catalog_*` or `catalog_status_*` otherwise |
+| `source_kind` | `origin` | passed through (`zenodo` for all fifteen) |
+| `dataset_version`, `content_digest` | *nothing* | stays `None`, and the verdict now says so by name |
+| parser / axis / label / pairing evidence | *nothing* | `declared: false` on each aggregate; an undeclared claim is no longer scored as a declared negative one |
+
+### Ranking, before and after
+
+Every readiness score is still 0 — no task-truth evidence exists on this
+endpoint, and none was invented. The ranking is no longer degenerate because a
+second key sits *below* declared task evidence: whole-word term evidence plus
+format evidence, both properties of the record rather than of its name.
+
+| Rank | Before | After | |
+| --- | --- | --- | --- |
+| 1 | `zenodo-3473148` (Texas flooding, xlsx) | `zenodo-15498570` HERFD-XAS, dat, 108/109 | rel 100 |
+| 2 | `zenodo-3380560` (Texas bridges, odb) | `zenodo-10606662` in-situ XANES, dat, 491/495 | rel 100 |
+| 3 | `zenodo-17915983` (Texas storms, nc) | `zenodo-18142209` EELS+XAS, json | rel 85 |
+| 4 | `zenodo-17483574` (hexasomes) | `zenodo-16892323` XANES, rar | rel 70 |
+| 5 | `zenodo-15498570` | `zenodo-16610131` EXAFS, mp4 | rel 60 |
+| 6 | `zenodo-10070373` (Texas wetlands) | `zenodo-17915983` | rel 40 |
+| 7 | `zenodo-18142209` | `zenodo-3473148` | rel 35 |
+| 10 | `zenodo-10606662` | — | |
+| 15 | `zenodo-154112` (NEXAFS/ESRI trap) | `zenodo-17483574` (hexasomes) | rel 0 |
+
+The five whole-word technique hits are ranks 1–5; every substring coincidence
+and adjacent-modality hit is at 6 or below. The in-situ XANES corpus moved from
+tenth to second, and the flooding study from first to seventh.
+
+The separation is lexical and format-based, never nominal. `XAS` inside `Texas`
+is an affix match and `XAS` in `基于EELS和XAS谱的铜氧化态预测数据集` is a whole
+term, because boundaries are ASCII-alphanumeric. A regression test swaps two
+records' titles and formats while leaving their dataset codes in place, and
+their ranks swap with them — there is no dataset-name list in the scorer.
+
+### Verdicts
+
+`zenodo-10606662` moved from
+
+```
+blocked: ["xas_access_unavailable", "xas_energy_axis_invalid"]
+```
+
+to
+
+```
+blocked: ["xas_dataset_version_unavailable",
+          "xas_content_digest_unavailable",
+          "xas_energy_axis_evidence_unavailable"]
+```
+
+Both original codes were false. The dataset is public, active and readable, and
+no energy axis had been declared and rejected — none had been declared at all.
+All fifteen candidates still reach a verdict, all still blocked, and the
+blocking reasons are now the true ones. The M0 gate is unchanged: a non-null
+version and digest remain required for scoreable admission.
+
+### Follow-up 2 is now answered, and stays open as work
+
+A read-only probe of the hub (`hyd --profile volcano dataset show`, plus the
+version, quality, files and integrity-summary endpoints) shows the pieces exist
+but not on one call: `GET /datasets/{id}/versions` already serialises a version
+identity, `GET /datasets/{id}/files` already serialises per-file SHA-256, and
+`GET /datasets/{id}/versions/{vid}/quality` already has a `content_digest`
+field — whose value is `null` for this dataset. `GET /datasets/{id}`, which
+`hyd dataset show` calls, carries none of the three. So the client extension is
+mostly a wrapper over endpoints that already exist, with one genuine hub-side
+gap: the digest value, not the digest field.
+
+## Test and verification delta
+
+`.venv/bin/pytest -q` 716 passed (682 before; 34 added: 20 pinning the live
+wire, 14 pinning the redaction boundary). `ruff check src tests` clean,
+`mypy src` clean over 44 files, `git diff --check` clean.
+
+The live capture is committed at
+`tests/fixtures/hyperdata/hyd-search-live-volcano-2026-08-10.json`. Its
+per-query SHA-256 digests equal `artifact_digests.search_response_sha256` in the
+evidence file, which is what re-establishes the raw responses the smoke did not
+retain; a test asserts that agreement so the fixture cannot drift away from the
+run it explains.
