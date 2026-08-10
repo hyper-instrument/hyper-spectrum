@@ -91,6 +91,13 @@ class XASCandidateProfile(BaseModel):
     content_digest: str | None
     access_available: bool
     energy_axis_valid: bool
+    # Whether the catalog published each claim at all.  An undeclared claim is a
+    # different fact from a declared claim that fails validation, and the two
+    # must not collapse into one reason code.
+    energy_axis_declared: bool
+    parser_declared: bool
+    label_declared: bool
+    pairing_declared: bool
     verified_label_roles: tuple[str, ...]
     verified_pairing_roles: tuple[str, ...]
     observations: tuple[XASEvidenceObservation, ...]
@@ -104,13 +111,15 @@ def profile_xas_candidate(candidate: DatasetCandidate) -> XASCandidateProfile:
     not prove that all facts needed for one task occurred together.
     """
     evidence = _mapping(candidate.evidence)
+    aggregate_parser = _mapping(evidence.get("parser_status"))
+    aggregate_axis = _mapping(evidence.get("axis_evidence"))
     aggregate_labels = _mapping(evidence.get("label_evidence"))
     aggregate_pairings = _mapping(evidence.get("pairing_evidence"))
     observations = tuple(
         _profile_observation(observation)
         for observation in _mappings(evidence.get("observations"))
     )
-    energy_axis = _mapping(_mapping(evidence.get("axis_evidence")).get("energy_axis"))
+    energy_axis = _mapping(aggregate_axis.get("energy_axis"))
     return XASCandidateProfile(
         dataset_code=candidate.dataset_code,
         dataset_version=candidate.dataset_version,
@@ -120,6 +129,10 @@ def profile_xas_candidate(candidate: DatasetCandidate) -> XASCandidateProfile:
             energy_axis.get("valid") is True
             and _nonblank(energy_axis.get("unit")) is not None
         ),
+        energy_axis_declared=_declared(aggregate_axis, energy_axis),
+        parser_declared=_declared(aggregate_parser, aggregate_parser),
+        label_declared=_declared(aggregate_labels, aggregate_labels),
+        pairing_declared=_declared(aggregate_pairings, aggregate_pairings),
         verified_label_roles=(
             _strings(aggregate_labels.get("ground_truth_roles"))
             if aggregate_labels.get("verified") is True
@@ -206,26 +219,75 @@ def recommend_xas_tasks(profile: XASCandidateProfile) -> tuple[ReadinessVerdict,
 
     if verdicts:
         return tuple(verdicts)
+    # Missing task truth does not block inference, but the reason it is missing
+    # is worth stating: an undeclared claim and a declared-but-unverified one
+    # lead to different fixes.
+    reasons = ["xas_no_verified_scoreable_ground_truth"]
+    details = ["No verified task truth is available for quantitative scoring."]
+    for declared, code, detail in (
+        (
+            profile.label_declared,
+            "xas_label_evidence_unavailable",
+            "The catalog published no ground-truth label evidence.",
+        ),
+        (
+            profile.pairing_declared,
+            "xas_pairing_evidence_unavailable",
+            "The catalog published no spectrum-pairing evidence.",
+        ),
+        (
+            profile.parser_declared,
+            "xas_parser_evidence_unavailable",
+            "The catalog published no parser evidence for the candidate's files.",
+        ),
+    ):
+        if not declared:
+            reasons.append(code)
+            details.append(detail)
     return (
         ReadinessVerdict(
             dataset_code=profile.dataset_code,
             dataset_version=profile.dataset_version,
             content_digest=profile.content_digest,
             status="inference_only",
-            reasons=("xas_no_verified_scoreable_ground_truth",),
+            reasons=tuple(reasons),
             candidate_tasks=(),
-            details=("No verified task truth is available for quantitative scoring.",),
+            details=tuple(details),
         ),
     )
 
 
 def _blocked_verdict(profile: XASCandidateProfile) -> ReadinessVerdict | None:
+    """Enumerate every unmet admission condition, naming absence as absence.
+
+    A candidate the catalog never described is not the same as one it described
+    badly, and the M0 gate needs both a pinned version and a content digest
+    before any quantitative claim can be reproduced.
+    """
     reasons: list[str] = []
     details: list[str] = []
     if not profile.access_available:
         reasons.append("xas_access_unavailable")
         details.append("The candidate is not available through the admitted catalog.")
-    if not profile.energy_axis_valid:
+    if profile.dataset_version is None:
+        reasons.append("xas_dataset_version_unavailable")
+        details.append(
+            "The catalog record carries no dataset version, so the candidate "
+            "cannot be pinned to a reproducible revision."
+        )
+    if profile.content_digest is None:
+        reasons.append("xas_content_digest_unavailable")
+        details.append(
+            "The catalog record carries no content digest, so the candidate's "
+            "bytes cannot be bound to any later result."
+        )
+    if not profile.energy_axis_declared:
+        reasons.append("xas_energy_axis_evidence_unavailable")
+        details.append(
+            "The catalog published no energy-axis evidence for this candidate; "
+            "the axis is unknown, not known to be wrong."
+        )
+    elif not profile.energy_axis_valid:
         reasons.append("xas_energy_axis_invalid")
         details.append(
             "The candidate has no verified energy axis with a declared unit."
@@ -311,6 +373,21 @@ def _profile_observation(observation: Mapping[str, object]) -> XASEvidenceObserv
         pairing_roles=_strings(pairings.get("roles")),
         proxy_kind=_nonblank(pairings.get("proxy_kind")),
     )
+
+
+def _declared(
+    container: Mapping[str, object], claim: Mapping[str, object]
+) -> bool:
+    """Read the explicit declaration flag, or infer it from a pre-flag claim.
+
+    Evidence assembled before the flag existed carries no `declared` key; such
+    evidence was hand-built from a source that did publish the claim, so a
+    non-empty claim still counts as declared.
+    """
+    flag = container.get("declared")
+    if isinstance(flag, bool):
+        return flag
+    return bool(claim)
 
 
 def _mappings(value: object) -> tuple[Mapping[str, object], ...]:

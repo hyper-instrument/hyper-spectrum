@@ -200,7 +200,12 @@ def test_raw_observations_must_contain_complete_verified_pairing_evidence() -> N
     assert [(verdict.status, verdict.candidate_tasks) for verdict in verdicts] == [
         ("inference_only", ())
     ]
-    assert verdicts[0].reasons == ("xas_no_verified_scoreable_ground_truth",)
+    # Label and pairing evidence were declared here, so only the parser claim is
+    # reported absent; the pair roles simply never co-occurred in one observation.
+    assert verdicts[0].reasons == (
+        "xas_no_verified_scoreable_ground_truth",
+        "xas_parser_evidence_unavailable",
+    )
 
 
 def test_lcf_weight_regression_is_independent_of_primary_denoising_recommendation() -> (
