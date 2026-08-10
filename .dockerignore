@@ -1,0 +1,25 @@
+# What must not enter the build context.
+#
+# `docker/ace-candidate/Dockerfile` does `COPY . /opt/hyperspectrum-sdk`, and
+# ACE's equivalent installs a `git archive` of one commit — tracked files and
+# nothing else. Everything listed here is what stands between those two being
+# the same tree: a local virtualenv, a stale build output, someone's run
+# directory, and the caches that follow a developer around.
+#
+# `.git` in particular: it is large, it is not part of any installed artifact,
+# and a build service that clones and builds would otherwise ship the whole
+# history into a layer.
+
+.git
+.gitignore
+.dockerignore
+.worktrees/
+.venv/
+runs/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
