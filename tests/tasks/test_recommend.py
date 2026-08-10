@@ -324,3 +324,105 @@ def test_scoreable_verdict_accepts_canonical_task_contracts(
     )
 
     assert verdict.candidate_tasks == (task,)
+
+
+def _identity_gap_verdict(**overrides: object) -> ReadinessVerdict:
+    """Run the readiness pass over a candidate with one identity field removed."""
+    dataset = candidate(pairing_roles=("noisy_spectrum", "clean_spectrum")).model_copy(
+        update=overrides
+    )
+    verdicts = recommend_xas_tasks(profile_xas_candidate(dataset))
+    assert len(verdicts) == 1
+    return verdicts[0]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"dataset_version": None}, "xas_dataset_version_unavailable"),
+        ({"content_digest": None}, "xas_content_digest_unavailable"),
+    ],
+)
+def test_absent_identity_degrades_to_inference_only_rather_than_blocking(
+    overrides: dict[str, object], reason: str
+) -> None:
+    """Catches an unidentifiable candidate being refused the inference it can run.
+
+    Inference needs neither a pinned revision nor a digest — only a *scoreable*
+    claim does, because only a scoreable claim has to be reproducible later.
+    Blocking is reserved for candidates we cannot read or cannot parse.
+    """
+    verdict = _identity_gap_verdict(**overrides)
+
+    assert verdict.status == "inference_only"
+    assert reason in verdict.reasons
+
+
+def test_absent_axis_evidence_degrades_but_a_declared_invalid_axis_still_blocks() -> None:
+    """Catches collapsing 'the catalog said nothing' into 'the catalog said wrong'."""
+    undeclared = candidate(pairing_roles=("noisy_spectrum", "clean_spectrum"))
+    evidence = dict(undeclared.evidence)
+    del evidence["axis_evidence"]
+    undeclared = undeclared.model_copy(update={"evidence": evidence})
+
+    absent = recommend_xas_tasks(profile_xas_candidate(undeclared))[0]
+    invalid = recommend_xas_tasks(
+        profile_xas_candidate(
+            candidate(axis_valid=False, pairing_roles=("noisy_spectrum", "clean_spectrum"))
+        )
+    )[0]
+
+    assert absent.status == "inference_only"
+    assert "xas_energy_axis_evidence_unavailable" in absent.reasons
+    assert invalid.status == "blocked"
+    assert "xas_energy_axis_invalid" in invalid.reasons
+
+
+def test_identity_absence_still_denies_a_scoreable_verdict() -> None:
+    """Catches the degraded route leaking verified truth into a scoreable claim.
+
+    The admission gate is unchanged: a quantitative claim needs an identity to
+    be reproducible against. Verified noisy/clean pairing would otherwise make
+    this candidate scoreable for denoising.
+    """
+    verdict = _identity_gap_verdict(content_digest=None)
+
+    assert verdict.status != "scoreable"
+    assert verdict.candidate_tasks == ()
+    assert verdict.ground_truth_roles == ()
+    assert verdict.split_group_keys == ()
+
+
+def test_unreadable_candidates_stay_blocked_and_keep_every_gap_named() -> None:
+    """Catches an access failure being softened into inference-only by an
+    identity gap that happens to co-occur with it."""
+    dataset = candidate(access_status="archive_only").model_copy(
+        update={"dataset_version": None, "content_digest": None}
+    )
+
+    verdict = recommend_xas_tasks(profile_xas_candidate(dataset))[0]
+
+    assert verdict.status == "blocked"
+    assert set(verdict.reasons) == {
+        "xas_access_unavailable",
+        "xas_dataset_version_unavailable",
+        "xas_content_digest_unavailable",
+    }
+
+
+def test_a_degraded_verdict_reports_the_identity_it_still_has() -> None:
+    """Catches dropping the half-identity that survives — a pinned version with
+    no digest is still worth carrying to whoever has to fix it."""
+    verdict = _identity_gap_verdict(content_digest=None)
+
+    assert verdict.dataset_version == "v1"
+    assert verdict.content_digest is None
+    assert "xas_dataset_version_unavailable" not in verdict.reasons
+
+
+def test_degraded_verdicts_say_why_absence_is_not_a_blockage() -> None:
+    """Catches reason codes travelling without the sentence a human needs."""
+    verdict = _identity_gap_verdict(content_digest=None)
+
+    assert any("bytes cannot be bound" in detail for detail in verdict.details)
+    assert any("Inference requires none of these" in detail for detail in verdict.details)

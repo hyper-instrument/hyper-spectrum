@@ -410,6 +410,10 @@ def _candidate_from_observations(
         dataset_code=dataset_code,
         dataset_version=_uniform_optional_string(observed, "dataset_version"),
         content_digest=_uniform_optional_string(observed, "content_digest"),
+        # Same uniformity rule the digest itself follows: two catalog rows that
+        # disagree about provenance are not evidence of either answer.
+        content_digest_source=_uniform_optional_string(observed, "content_digest_source"),
+        quality_status=_uniform_optional_string(observed, "quality_status"),
         title=_canonical_string(observed, "title"),
         description=_canonical_string(observed, "description"),
         file_count=max(cast(int, observation["file_count"]) for observation in observed),
@@ -464,6 +468,13 @@ def _observation_evidence(query: str, record: Mapping[str, object]) -> dict[str,
         "term_match": _term_match(query, title, dataset_code),
         "dataset_version": _optional_string(record.get("dataset_version")),
         "content_digest": _optional_string(record.get("content_digest")),
+        # The hub's dataset-detail wire names where a digest came from
+        # ("quality_verified" / "files_fingerprint") and how the bytes scored, so
+        # a consumer can record the provenance next to the identity instead of
+        # guessing at it. Today's search wire carries neither; read them where
+        # they appear rather than inventing them where they do not.
+        "content_digest_source": _optional_string(record.get("content_digest_source")),
+        "quality_status": _optional_string(record.get("quality_status")),
         "title": title,
         "description": _optional_string(record.get("description")) or "",
         "file_count": file_count,

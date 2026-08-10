@@ -63,6 +63,14 @@ class DatasetCandidate(BaseModel):
     dataset_code: str
     dataset_version: str | None
     content_digest: str | None
+    # How the digest was established, and how well the bytes were checked — the
+    # hub publishes both alongside the digest. They are a *different* axis from
+    # the digest's value: one derived from the ingest-time files fingerprint
+    # pins which bytes just as a quality-verified one does, even while the
+    # quality status reads "unverified". Wires that do not publish them leave
+    # these None, and None means absent, not negative.
+    content_digest_source: str | None = None
+    quality_status: str | None = None
     title: str
     description: str
     file_count: int

@@ -1,0 +1,111 @@
+{
+  "provenance": {
+    "what": "The response shape of `hd dataset detail <ref> --json` on the HyperData hub.",
+    "why": "HyperSpectrum reads a dataset's content identity off this wire. The two repos share no code, so this fixture is the contract: if the hub renames a field, a test here fails instead of the identity silently reading as absent.",
+    "upstream": "hyper-instrument/hyper-data, branch claude/hyd-dataset-detail (PR #251)",
+    "captured": "2026-08-10",
+    "note": "Hand-shaped from the upstream command's documented JSON contract, not a live capture — the endpoint is not deployed yet. Do NOT add fields the upstream command does not emit; the point of this file is to be wrong loudly rather than optimistic quietly.",
+    "identity_block_keys": [
+      "dataset_id",
+      "dataset_version_id",
+      "version_no",
+      "content_digest",
+      "content_digest_source",
+      "quality_status",
+      "complete"
+    ],
+    "content_digest_source_values": ["quality_verified", "files_fingerprint", null],
+    "decision": "Value and status are independent axes. `content_digest_source: \"files_fingerprint\"` under `quality_status: \"unverified\"` is a VALID content identity — it pins which bytes — so it must not degrade a candidate. Only the absence of a digest does."
+  },
+  "hub_ingested_unverified": {
+    "dataset": {
+      "id": "7f412a0d-55eb-4d76-b443-c150c861ede4",
+      "dataset_code": "zenodo-10606662",
+      "title": "XANES reference spectra",
+      "visibility": "public",
+      "origin": "hub",
+      "owner_user_id": null,
+      "primary_format": "dat",
+      "file_count": 3,
+      "total_size_bytes": 4096,
+      "created_at": "2026-08-01T00:00:00+00:00"
+    },
+    "current_version_no": 2,
+    "versions": [
+      {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "version_no": 2,
+        "version_label": null,
+        "version_type": "reingest",
+        "source_snapshot_id": null,
+        "created_at": "2026-08-02T00:00:00+00:00",
+        "file_count": 3
+      }
+    ],
+    "selected_version": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "version_no": 2,
+      "version_label": null,
+      "version_type": "reingest",
+      "source_snapshot_id": null,
+      "created_at": "2026-08-02T00:00:00+00:00",
+      "file_count": 3
+    },
+    "identity": {
+      "dataset_id": "7f412a0d-55eb-4d76-b443-c150c861ede4",
+      "dataset_version_id": "22222222-2222-4222-8222-222222222222",
+      "version_no": 2,
+      "content_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "content_digest_source": "files_fingerprint",
+      "quality_status": "unverified",
+      "complete": true
+    },
+    "quality": {
+      "dataset_id": "7f412a0d-55eb-4d76-b443-c150c861ede4",
+      "version_id": "22222222-2222-4222-8222-222222222222",
+      "status": "unverified",
+      "revision": 0,
+      "rule_version": null,
+      "content_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "content_digest_source": "files_fingerprint",
+      "checked_at": null,
+      "assessor_type": null,
+      "assessor_ref": null,
+      "blockers": [],
+      "warnings": [],
+      "unverified": ["no quality run"],
+      "signals": {}
+    },
+    "digest_coverage": {
+      "basis": "integrity_summary",
+      "scope": "latest_version",
+      "files_total": 3,
+      "files_with_digest": 2,
+      "coverage": 0.6667,
+      "checksum_algorithm": "sha256"
+    },
+    "files": null
+  },
+  "quality_verified": {
+    "identity": {
+      "dataset_id": "7f412a0d-55eb-4d76-b443-c150c861ede4",
+      "dataset_version_id": "11111111-1111-4111-8111-111111111111",
+      "version_no": 1,
+      "content_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "content_digest_source": "quality_verified",
+      "quality_status": "passed",
+      "complete": true
+    }
+  },
+  "no_identity": {
+    "identity": {
+      "dataset_id": "7f412a0d-55eb-4d76-b443-c150c861ede4",
+      "dataset_version_id": "33333333-3333-4333-8333-333333333333",
+      "version_no": 1,
+      "content_digest": null,
+      "content_digest_source": null,
+      "quality_status": "unverified",
+      "complete": false
+    }
+  }
+}

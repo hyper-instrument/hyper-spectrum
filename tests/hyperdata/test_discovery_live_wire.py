@@ -182,7 +182,10 @@ def test_live_verdicts_name_the_missing_identity_not_a_false_inaccessibility(
 
     assert len(verdicts) == 1
     verdict = verdicts[0]
-    assert verdict.status == "blocked"
+    # The live hub serves a readable public dataset it simply never identified.
+    # That is an absence, not a failure: the candidate can still be run, it just
+    # cannot carry a reproducible score.
+    assert verdict.status == "inference_only"
     assert "xas_access_unavailable" not in verdict.reasons
     assert set(verdict.reasons) == {
         "xas_dataset_version_unavailable",
@@ -199,8 +202,32 @@ def test_every_live_candidate_reaches_a_verdict_without_raising(
     for candidate in live_candidates:
         verdicts = recommend_xas_tasks(profile_xas_candidate(candidate))
         assert verdicts
-        assert all(verdict.status == "blocked" for verdict in verdicts)
         assert all(verdict.reasons for verdict in verdicts)
+        # Nothing the live hub currently serves carries enough identity to be
+        # scored; none of it is unreadable either.
+        assert all(verdict.status == "inference_only" for verdict in verdicts)
+
+
+def test_the_live_rank_leaders_are_inference_only_not_blocked(
+    live_candidates: tuple[DatasetCandidate, ...],
+) -> None:
+    """Catches the whole live corpus being written off as unusable.
+
+    Ranking is evidence-led and runs before any verdict, so the two large
+    spectroscopy corpora still lead. Reading them as `blocked` said the hub had
+    nothing runnable at all; `inference_only` says the truthful thing — they run,
+    they just cannot be scored until the catalog identifies them.
+    """
+
+    leaders = [candidate.dataset_code for candidate in live_candidates][:2]
+    assert set(leaders) == {"zenodo-15498570", "zenodo-10606662"}
+
+    for code in leaders:
+        verdict = recommend_xas_tasks(
+            profile_xas_candidate(_by_code(live_candidates)[code])
+        )[0]
+        assert verdict.status == "inference_only"
+        assert verdict.candidate_tasks == ()
 
 
 def test_ranking_puts_whole_word_technique_hits_above_substring_coincidences(

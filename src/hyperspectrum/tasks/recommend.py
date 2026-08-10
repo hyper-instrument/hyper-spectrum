@@ -28,6 +28,11 @@ class ReadinessVerdict(BaseModel):
     dataset_code: str
     dataset_version: str | None
     content_digest: str | None
+    # Carried beside the digest, never folded into it: how the digest was
+    # established and how well the bytes were checked are a different axis from
+    # which bytes they are. A consumer records all three together.
+    content_digest_source: str | None = None
+    quality_status: str | None = None
     status: Literal["scoreable", "inference_only", "blocked"]
     reasons: tuple[str, ...]
     candidate_tasks: tuple[str, ...]
@@ -89,6 +94,8 @@ class XASCandidateProfile(BaseModel):
     dataset_code: str
     dataset_version: str | None
     content_digest: str | None
+    content_digest_source: str | None = None
+    quality_status: str | None = None
     access_available: bool
     energy_axis_valid: bool
     # Whether the catalog published each claim at all.  An undeclared claim is a
@@ -124,6 +131,8 @@ def profile_xas_candidate(candidate: DatasetCandidate) -> XASCandidateProfile:
         dataset_code=candidate.dataset_code,
         dataset_version=candidate.dataset_version,
         content_digest=candidate.content_digest,
+        content_digest_source=candidate.content_digest_source,
+        quality_status=candidate.quality_status,
         access_available=evidence.get("access_status") == "admitted_catalog",
         energy_axis_valid=(
             energy_axis.get("valid") is True
@@ -149,9 +158,9 @@ def profile_xas_candidate(candidate: DatasetCandidate) -> XASCandidateProfile:
 
 def recommend_xas_tasks(profile: XASCandidateProfile) -> tuple[ReadinessVerdict, ...]:
     """Recommend only XAS tasks whose required evidence is independently verified."""
-    blocked = _blocked_verdict(profile)
-    if blocked is not None:
-        return (blocked,)
+    admission = _admission_verdict(profile)
+    if admission is not None:
+        return (admission,)
 
     verdicts: list[ReadinessVerdict] = []
     if _aggregate_and_observation_pair(profile, "noisy_spectrum", "clean_spectrum"):
@@ -249,6 +258,8 @@ def recommend_xas_tasks(profile: XASCandidateProfile) -> tuple[ReadinessVerdict,
             dataset_code=profile.dataset_code,
             dataset_version=profile.dataset_version,
             content_digest=profile.content_digest,
+            content_digest_source=profile.content_digest_source,
+            quality_status=profile.quality_status,
             status="inference_only",
             reasons=tuple(reasons),
             candidate_tasks=(),
@@ -257,49 +268,99 @@ def recommend_xas_tasks(profile: XASCandidateProfile) -> tuple[ReadinessVerdict,
     )
 
 
-def _blocked_verdict(profile: XASCandidateProfile) -> ReadinessVerdict | None:
+_DEGRADED_DETAIL = (
+    "Inference requires none of these; only a quantitative claim does, because "
+    "only a quantitative claim has to be reproducible later."
+)
+
+
+def _admission_verdict(profile: XASCandidateProfile) -> ReadinessVerdict | None:
     """Enumerate every unmet admission condition, naming absence as absence.
 
-    A candidate the catalog never described is not the same as one it described
-    badly, and the M0 gate needs both a pinned version and a content digest
-    before any quantitative claim can be reproduced.
+    Two kinds of gap live here and they do not deserve the same answer.
+
+    *Failures* — the candidate cannot be read, or the catalog published an
+    energy axis that does not validate — block outright. Nothing useful can be
+    run against bytes we cannot fetch or a claim we know to be wrong.
+
+    *Absences* — no pinned version, no content digest, no published axis
+    evidence — degrade to ``inference_only`` instead. Inference needs none of
+    these; only scoring does, since only a score has to be reproducible against
+    a specific revision of specific bytes. Blocking an unidentified candidate
+    refused it the inference it was perfectly capable of running.
+
+    The admission gate itself is unchanged: the degraded route returns before
+    any task truth is examined, so identity absence can never yield a scoreable
+    verdict. Every reason code is carried either way — a blocked candidate that
+    is *also* unidentified reports both, and nothing gets swallowed.
     """
-    reasons: list[str] = []
-    details: list[str] = []
+    blocking: list[tuple[str, str]] = []
+    degrading: list[tuple[str, str]] = []
     if not profile.access_available:
-        reasons.append("xas_access_unavailable")
-        details.append("The candidate is not available through the admitted catalog.")
+        blocking.append((
+            "xas_access_unavailable",
+            "The candidate is not available through the admitted catalog.",
+        ))
     if profile.dataset_version is None:
-        reasons.append("xas_dataset_version_unavailable")
-        details.append(
-            "The catalog record carries no dataset version, so the candidate "
-            "cannot be pinned to a reproducible revision."
-        )
+        degrading.append((
+            "xas_dataset_version_unavailable",
+            (
+                "The catalog record carries no dataset version, so the candidate "
+                "cannot be pinned to a reproducible revision."
+            ),
+        ))
     if profile.content_digest is None:
-        reasons.append("xas_content_digest_unavailable")
-        details.append(
-            "The catalog record carries no content digest, so the candidate's "
-            "bytes cannot be bound to any later result."
-        )
+        degrading.append((
+            "xas_content_digest_unavailable",
+            (
+                "The catalog record carries no content digest, so the candidate's "
+                "bytes cannot be bound to any later result."
+            ),
+        ))
     if not profile.energy_axis_declared:
-        reasons.append("xas_energy_axis_evidence_unavailable")
-        details.append(
-            "The catalog published no energy-axis evidence for this candidate; "
-            "the axis is unknown, not known to be wrong."
-        )
+        degrading.append((
+            "xas_energy_axis_evidence_unavailable",
+            (
+                "The catalog published no energy-axis evidence for this candidate; "
+                "the axis is unknown, not known to be wrong."
+            ),
+        ))
     elif not profile.energy_axis_valid:
-        reasons.append("xas_energy_axis_invalid")
-        details.append(
-            "The candidate has no verified energy axis with a declared unit."
+        blocking.append((
+            "xas_energy_axis_invalid",
+            "The candidate has no verified energy axis with a declared unit.",
+        ))
+    if blocking:
+        # A readable-access failure is not softened by an identity gap that
+        # happens to co-occur with it; both are reported under the harder verdict.
+        gaps = [*blocking, *degrading]
+        return _gap_verdict(profile, "blocked", gaps, extra_detail=None)
+    if degrading:
+        return _gap_verdict(
+            profile, "inference_only", degrading, extra_detail=_DEGRADED_DETAIL
         )
-    if not reasons:
-        return None
+    return None
+
+
+def _gap_verdict(
+    profile: XASCandidateProfile,
+    status: Literal["blocked", "inference_only"],
+    gaps: Sequence[tuple[str, str]],
+    *,
+    extra_detail: str | None,
+) -> ReadinessVerdict:
+    """Build the verdict for an unmet admission condition, reasons intact."""
+    details = [detail for _, detail in gaps]
+    if extra_detail is not None:
+        details.append(extra_detail)
     return ReadinessVerdict(
         dataset_code=profile.dataset_code,
         dataset_version=profile.dataset_version,
         content_digest=profile.content_digest,
-        status="blocked",
-        reasons=tuple(reasons),
+        content_digest_source=profile.content_digest_source,
+        quality_status=profile.quality_status,
+        status=status,
+        reasons=tuple(reason for reason, _ in gaps),
         candidate_tasks=(),
         details=tuple(details),
     )
@@ -321,6 +382,8 @@ def _scoreable(
         dataset_code=profile.dataset_code,
         dataset_version=profile.dataset_version,
         content_digest=profile.content_digest,
+        content_digest_source=profile.content_digest_source,
+        quality_status=profile.quality_status,
         status="scoreable",
         reasons=reasons,
         candidate_tasks=(task,),

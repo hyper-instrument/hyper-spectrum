@@ -237,6 +237,14 @@ All fifteen candidates still reach a verdict, all still blocked, and the
 blocking reasons are now the true ones. The M0 gate is unchanged: a non-null
 version and digest remain required for scoreable admission.
 
+> **Superseded later the same day** — see
+> `2026-08-10-inference-only-identity-absence.md`. The three reason codes above
+> are unchanged and still true, but their *consequence* is not: an absent
+> identity now routes to `inference_only` rather than `blocked`. These fifteen
+> candidates are readable and runnable; only their scoreability was ever in
+> question. `blocked` is now reserved for access and parse failures. The M0
+> gate itself is still unchanged.
+
 ### Follow-up 2 is now answered, and stays open as work
 
 A read-only probe of the hub (`hyd --profile volcano dataset show`, plus the
