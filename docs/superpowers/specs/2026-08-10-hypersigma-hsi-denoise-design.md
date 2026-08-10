@@ -174,8 +174,9 @@ Checkpoint loading performs these steps in order:
 8. Run prediction only under `torch.inference_mode()`.
 
 The runtime checks input and output shape, mask preservation, finite valid
-values, normalization-state digest, and parameter non-mutation. An explicit
-CUDA request fails when CUDA is unavailable; `auto` may select CPU.
+values, and normalization-state digest. Parameters are frozen before inference;
+the adapter does not claim a separate before/after state-dictionary comparison.
+An explicit CUDA request fails when CUDA is unavailable; `auto` may select CPU.
 
 ## 8. Data flow
 
@@ -207,10 +208,9 @@ the existing structured `CompatibilityIssue` codes `axis_rank` and
 
 Axis-name ambiguity, missing axes, unsupported extents, partial masks, source
 drift, weight mismatch, malformed checkpoint structure, strict-load mismatch,
-device failure, shape drift, non-finite output, or parameter mutation are
-explicit failures. No failure path may flatten, reinterpret, interpolate,
-repair, substitute assets, initialize a fallback model, or emit a successful
-metric record.
+device failure, shape drift, or non-finite output are explicit failures. No
+failure path may flatten, reinterpret, interpolate, repair, substitute assets,
+initialize a fallback model, or emit a successful metric record.
 
 ## 10. Testing
 
@@ -248,10 +248,14 @@ four. The local cache lives outside the repository checkout. The two checkpoint
 files are verified against the delegated sizes and SHA-256 values byte for
 byte.
 
-The complete `HyperSIGMA_denoising/` subset is downloaded. A generated evidence
-table records every relative path, byte count, and local SHA-256, including six
-`Testing/Cases/*/test.mat` files and all `Testing/Patch_Cases` files. Only the
-text table, commands, and smoke output are copied into the development document.
+The complete `HyperSIGMA_denoising/Testing/` evaluation tree is downloaded. A
+generated evidence table records every relative path, byte count, and local
+SHA-256, including six `Testing/Cases/*/test.mat` files and all
+`Testing/Patch_Cases` files. The pinned revision's training `data.mdb` has a
+remote LFS size/object inconsistency; it is not needed for this no-training
+task, is not represented as complete, and is documented as an upstream data
+limitation. Only the text table, commands, and smoke output are copied into the
+development document.
 
 Before commit, tracked and untracked file checks must prove that no checkpoint,
 MATLAB dataset file, cache directory, or derived prediction cube is inside Git.
@@ -268,11 +272,9 @@ branch named `delegation/DG-12-hypersigma-hsi-denoise`. It contains DG-12 in the
 title, does not use hyphenated identifiers for other delegations, and reports
 the PR through the authorized DG-12 endpoint immediately after creation.
 
-The latest packet reintroduced the literal `{{HUB_PAT}}` placeholder in generic
-sections while the task-specific scope and user instruction explicitly require
-no Hub data-plane access. The implementation therefore skips that chapter and
-records the template inconsistency as a generalization note. A feedback ticket
-is sent only if the user separately authorizes the feedback endpoint.
+Hub data-plane access is outside this task and is not performed. Delegation
+reporting happens only after PR creation through the separately authorized
+task-reporting path and leaves no credentials in this repository.
 
 ## 13. Rollback
 
