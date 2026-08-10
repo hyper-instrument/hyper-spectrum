@@ -1,0 +1,50 @@
+schema_version: hyperspectrum-tool/v1
+id: hypersigma-denoise
+version: 07e9ea24e3072fcb5c3a92a2bcb8185e43b295b9
+modalities: [hyperspectral]
+tasks: [denoising]
+runtime:
+  kind: python
+entrypoint: hyperspectrum.adapters.hypersigma:denoise_cubes
+inputs:
+  - role: raw_signal
+    kind: dense_array
+outputs:
+  - role: denoised_signal
+    kind: dense_array
+resources:
+  cpu: 4
+  memory_gb: 16
+  gpu: optional
+verify: [python3, -m, hyperspectrum.adapters.hypersigma, --verify]
+source:
+  kind: git
+  repository: https://github.com/WHU-Sigma/HyperSIGMA.git
+  commit: 07e9ea24e3072fcb5c3a92a2bcb8185e43b295b9
+license: Apache-2.0
+distribution: open-distribution
+weights:
+  required: true
+  state: present
+  allow_download: false
+  assets:
+    - variant: gaussian
+      repository: WHU-Sigma/HyperSIGMA
+      revision: e0567395fbdfddbae994695baf5fc73358a1ec3c
+      digest: dc101cfe7d462d721eb46395b1621d82103cf4e72166d8591b5619cb2d10e806
+      asset_id: hf-whu-sigma-hypersigma-gaussian-e0567395
+      source_url: https://huggingface.co/WHU-Sigma/HyperSIGMA/resolve/e0567395fbdfddbae994695baf5fc73358a1ec3c/Denoising_models/hypersigma_gaussian_noise_model.pth
+      filename: hypersigma_gaussian_noise_model.pth
+      size_bytes: 2266408098
+      license: Apache-2.0
+    - variant: complex
+      repository: WHU-Sigma/HyperSIGMA
+      revision: e0567395fbdfddbae994695baf5fc73358a1ec3c
+      digest: 8b1162aae6811af67d287b9271e74154db5448c5e2fd6df953dae5d7807bbe7e
+      asset_id: hf-whu-sigma-hypersigma-complex-e0567395
+      source_url: https://huggingface.co/WHU-Sigma/HyperSIGMA/resolve/e0567395fbdfddbae994695baf5fc73358a1ec3c/Denoising_models/hypersigma_complex_noise_model.pth
+      filename: hypersigma_complex_noise_model.pth
+      size_bytes: 2266408098
+      license: Apache-2.0
+training:
+  enabled: false

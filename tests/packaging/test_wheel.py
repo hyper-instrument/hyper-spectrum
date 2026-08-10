@@ -217,6 +217,7 @@ def installed_console(
     assert "hyperspectrum/resources/schemas/xas-m0-selection-v2.schema.json" in names
     assert "hyperspectrum/resources/tools/xas/savgol/tool.yaml" in names
     assert "hyperspectrum/resources/tools/xas/xasdenoise/tool.yaml" in names
+    assert "hyperspectrum/resources/tools/hsi/hypersigma-denoise/tool.yaml" in names
 
     environment_dir = root / "venv"
     created = command(
@@ -421,6 +422,10 @@ def test_root_and_packaged_resources_have_exact_byte_parity() -> None:
         (
             ROOT / "tools/xas/xasdenoise/tool.yaml",
             resources.joinpath("tools/xas/xasdenoise/tool.yaml"),
+        ),
+        (
+            ROOT / "tools/hsi/hypersigma-denoise/tool.yaml",
+            resources.joinpath("tools/hsi/hypersigma-denoise/tool.yaml"),
         ),
     )
     for root_file, packaged in pairs:
