@@ -40,6 +40,10 @@ package = true
 
 [tool.ruff]
 target-version = "py310"
+# ACE's bytes, copied and not authored here. Linting them would produce fixes
+# this repository is not allowed to apply: the copies are pinned by SHA-256 in
+# `docker/ace-candidate/vendored.sha256.json`, so a reformat is a drift.
+extend-exclude = ["docker/ace-candidate/vendor"]
 
 [tool.mypy]
 python_version = "3.10"

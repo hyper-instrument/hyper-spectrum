@@ -1,0 +1,29 @@
+{
+  "files": {
+    "answer.py": {
+      "sha256": "45b3a862da092019feab18b66208de76033f59b58c5d1bac7023d545c8ecd9ad",
+      "size": 12699,
+      "upstream_path": "harness/docker/research/traditional-xas-denoising/answer.py"
+    },
+    "entry.py": {
+      "sha256": "5333e3b02820b1baa75fcbe632ef9e18eb690e6cd5c0836f8c2166e412978403",
+      "size": 7826,
+      "upstream_path": "harness/docker/research/common/entry.py"
+    },
+    "run.py": {
+      "sha256": "2bbb1b9d39ad6aea7c5385a480f7685d6462797966a4fd12ba11470f1f6af1ec",
+      "size": 25434,
+      "upstream_path": "harness/docker/research/traditional-xas-denoising/run.py"
+    },
+    "verify.py": {
+      "sha256": "93a1ea628e6512c6d28bc6f9cf49963bb96d7d1ae5dbde2cc90f5597c5703b78",
+      "size": 4303,
+      "upstream_path": "harness/docker/research/traditional-xas-denoising/verify.py"
+    }
+  },
+  "schema_version": "hyperspectrum-vendored-manifest/v1",
+  "source": {
+    "commit": "e50b9da7c8acfb5b73ee4cbcf0c475ba7e42e0ef",
+    "repository": "ace-benchmark"
+  }
+}
