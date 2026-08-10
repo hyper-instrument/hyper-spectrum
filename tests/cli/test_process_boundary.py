@@ -422,6 +422,55 @@ def test_process_boundary_redacts_service_private_and_reserved_url_authorities(
     assert "[REDACTED]" in rendered
 
 
+@pytest.mark.parametrize(
+    "scientific_text",
+    (
+        # The live volcano catalog title that exposed this: a slash between two
+        # closing parentheses is chemistry notation, never a filesystem path.
+        "In-situ XANES data for the calcination of Ca(II)/Ce(IV)-doped LaPO4 monazite",
+        "Mn(III)/Mn(IV) mixed-valence oxide",
+        "Reduction revealed by Pt(IV)/Pt(II) X-ray fluorescence imaging",
+        "Normalised absorption I/I0 against the Fe K-edge",
+        "Measured w/ 20 repeated scans",
+        "XPS and/or NEXAFS reference spectra",
+        "Sample [A]/B comparison",
+    ),
+)
+def test_process_boundary_keeps_scientific_slashes_out_of_the_path_redactor(
+    scientific_text: str,
+) -> None:
+    """Catches a bare slash after a token being read as a POSIX absolute path."""
+
+    assert redact_text(scientific_text) == scientific_text
+
+
+@pytest.mark.parametrize(
+    "text_with_path",
+    (
+        "see /etc/passwd now",
+        "/data/hyperdata/previews/run.h5",
+        "path: /jfs/h5_result/session.h5",
+        'root="/private/var/folders/x"',
+        "(/opt/secret/key.pem)",
+        "output=/home/user/runs/out.npz",
+        "loaded\n/srv/private/input.dat\n",
+    ),
+)
+def test_process_boundary_still_redacts_absolute_paths_in_path_context(
+    text_with_path: str,
+) -> None:
+    """Tightening the path heuristic must not weaken the fail-safe posture."""
+
+    rendered = redact_text(text_with_path)
+
+    assert "[REDACTED]" in rendered
+    assert "passwd" not in rendered
+    assert "hyperdata" not in rendered
+    assert "h5_result" not in rendered
+    assert "secret" not in rendered
+    assert "private" not in rendered
+
+
 def test_real_cli_refuses_legacy_v1_plan_with_migration_message(
     tmp_path: Path,
 ) -> None:

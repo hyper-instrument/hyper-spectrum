@@ -51,8 +51,14 @@ _SERVICE_HOST_PORT = re.compile(
 _ISO_DATE_HOUR = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}t[0-9]{2}$", re.IGNORECASE)
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"(?i)\b[a-z]:\\(?:[^\\\s]+\\)*[^\\\s]+")
 _UNC_ABSOLUTE_PATH = re.compile(r"(?<!\\)\\\\(?:[^\\\s]+\\)+[^\\\s]+")
+# A leading slash only starts a path when it also starts a token.  Requiring an
+# opening delimiter (or the start of a line) in front of it keeps real absolute
+# paths redacted while leaving intra-token slashes alone -- `Ca(II)/Ce(IV)`,
+# `I/I0`, `and/or`, `[A]/B`.  A closing bracket, a word character, `.`, `-`, `:`
+# and `/` are all deliberately excluded: `:` and `/` also keep `https://host/p`
+# from being re-read as a path after URL authority redaction.
 _POSIX_ABSOLUTE_PATH = re.compile(
-    r"(?<![:/A-Za-z0-9_])/(?:[A-Za-z0-9._~-]+/)*[A-Za-z0-9._~-]+"
+    r"(?<![^\s\"'(\[{<,;=>|])/(?:[A-Za-z0-9._~-]+/)*[A-Za-z0-9._~-]+"
 )
 _ENDPOINT_HOST = re.compile(
     r"(?ix)(?<![A-Za-z0-9_.-])(?:"
