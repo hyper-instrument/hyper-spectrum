@@ -3,20 +3,51 @@
 The upstream source and checkpoints stay external to this package.  This
 module records their immutable identities and only operates on caller-mounted
 files; it never downloads code, weights, or datasets.
+
+The pinned ``ImageDenoising/models/hypersigma/model.py`` configures a spatial
+encoder with patch 2, embedding 768, depth 12, 12 heads, outputs 3/5/7/11,
+interval 3, and 8 sampling points; its spectral encoder uses 100 tokens,
+embedding 768, depth 12, 12 heads, and output 11.  The spatial adapter uses
+patch 1, embedding 768, depth 12, and output 3.  The spectral adapter declares
+100 tokens, embedding 128, depth 12, and output 3; pinned
+``Spectral_route.py`` actually executes its four constructed blocks.  Final
+3x3 convolutions reconstruct 382 to 191 channels and then 191 to 191.  Class
+implementations are pinned in ``Spatial.py``, ``Spectral.py``,
+``Spatial_route.py``, and ``Spectral_route.py`` by the hashes below.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
+import sys
+import threading
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from types import MappingProxyType
-from typing import Any, BinaryIO, Literal, cast
+from types import MappingProxyType, ModuleType
+from typing import Any, BinaryIO, Literal, Protocol, cast
+
+import numpy as np
+from numpy.typing import NDArray
+
+from hyperspectrum.denoising.model import (
+    CanonicalDenoisingInput,
+    CanonicalDenoisingOutput,
+    ModelCapabilities,
+)
+from hyperspectrum.plugins.hsi.arrays import resolve_hsi_layout
 
 WeightVariant = Literal["gaussian", "complex"]
+_MODEL_LOCK = threading.Lock()
+_UPSTREAM_STEMS = ("Spatial", "Spectral", "Spatial_route", "Spectral_route", "model")
+
+
+class _PredictRuntime(Protocol):
+    def predict(self, values: NDArray[np.float64]) -> NDArray[np.float64]: ...
 
 HYPERSIGMA_SOURCE_COMMIT = "07e9ea24e3072fcb5c3a92a2bcb8185e43b295b9"
 HYPERSIGMA_CODE_LICENSE = "Apache-2.0"
@@ -115,6 +146,182 @@ class VerifiedSourceTree:
     file_sha256: Mapping[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class HyperSIGMARuntimeIdentity:
+    """Exact source, checkpoint, and device used by one runtime instance."""
+
+    source_commit: str
+    source_sha256: Mapping[str, str]
+    weight: VerifiedWeightIdentity
+    device: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "source_sha256", MappingProxyType(dict(self.source_sha256))
+        )
+
+
+def _load_verified_modules(
+    verified: VerifiedSourceTree,
+) -> tuple[dict[str, ModuleType], tuple[str, ...]]:
+    model_dir = verified.root / "ImageDenoising/models/hypersigma"
+    package_name = f"_hypersigma_verified_{uuid.uuid4().hex}"
+    package = ModuleType(package_name)
+    package.__package__ = package_name
+    package.__path__ = [str(model_dir)]
+    loaded_names = [package_name]
+    sys.modules[package_name] = package
+    modules: dict[str, ModuleType] = {}
+    try:
+        for stem in _UPSTREAM_STEMS:
+            qualified = f"{package_name}.{stem}"
+            spec = importlib.util.spec_from_file_location(
+                qualified, model_dir / f"{stem}.py"
+            )
+            if spec is None or spec.loader is None:
+                raise ImportError(f"cannot create import spec for verified {stem}.py")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[qualified] = module
+            loaded_names.append(qualified)
+            spec.loader.exec_module(module)
+            modules[stem] = module
+    except BaseException:
+        for name in reversed(loaded_names):
+            sys.modules.pop(name, None)
+        raise
+    return modules, tuple(loaded_names)
+
+
+def _unload_verified_modules(names: Sequence[str]) -> None:
+    for name in reversed(tuple(names)):
+        sys.modules.pop(name, None)
+
+
+def _construct_official_model(modules: Mapping[str, ModuleType]) -> Any:
+    spatial_class = modules["Spatial"].SpatialVisionTransformer
+    spectral_class = modules["Spectral"].SpectralVisionTransformer
+    spatial_init = spatial_class.init_weights
+    spectral_init = spectral_class.init_weights
+
+    def skip_private_pretrain(_self: Any, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    spatial_class.init_weights = skip_private_pretrain
+    spectral_class.init_weights = skip_private_pretrain
+    try:
+        return modules["model"].spat_vit_b_rvsa()
+    finally:
+        spatial_class.init_weights = spatial_init
+        spectral_class.init_weights = spectral_init
+
+
+def _build_official_model(verified: VerifiedSourceTree) -> Any:
+    with _MODEL_LOCK:
+        modules, loaded_names = _load_verified_modules(verified)
+        try:
+            return _construct_official_model(modules)
+        finally:
+            _unload_verified_modules(loaded_names)
+
+
+class HyperSIGMADenoiseAdapter:
+    """Canonical HSI adapter for one pinned official HyperSIGMA checkpoint."""
+
+    capabilities = ModelCapabilities(
+        schema_version="hyperspectrum-denoising-capabilities/v1",
+        axis_ranks=(3,),
+        representations=("dense",),
+        channel_counts=(1,),
+        required_normalization="per_spectrum_range",
+        native_unit_recovery=True,
+    )
+
+    def __init__(
+        self,
+        source_root: Path,
+        weight_path: Path,
+        *,
+        variant: WeightVariant,
+        device: str = "cpu",
+        _runtime: _PredictRuntime | None = None,
+    ) -> None:
+        if variant not in HYPERSIGMA_WEIGHTS:
+            raise ValueError(f"unknown HyperSIGMA weight variant: {variant}")
+        self._runtime = (
+            _runtime
+            if _runtime is not None
+            else _TorchRuntime(
+                source_root,
+                weight_path,
+                contract=HYPERSIGMA_WEIGHTS[variant],
+                device=device,
+            )
+        )
+        self.source_root = source_root
+        self.weight_path = weight_path
+        self.variant = variant
+        self.requested_device = device
+
+    def predict(
+        self, model_input: CanonicalDenoisingInput
+    ) -> CanonicalDenoisingOutput:
+        """Denoise one explicitly declared, normalized 191×64×64 HSI cube."""
+
+        if model_input.modality != "hyperspectral":
+            raise ValueError("HyperSIGMA requires hyperspectral modality")
+        if model_input.representation != "dense" or np.iscomplexobj(
+            model_input.signal
+        ):
+            raise ValueError("HyperSIGMA requires real dense input")
+        if model_input.channel_labels:
+            raise ValueError("HyperSIGMA requires one implicit channel")
+        if model_input.normalization_method != "per_spectrum_range":
+            raise ValueError("HyperSIGMA requires per_spectrum_range normalization")
+        if not np.all(model_input.valid_mask):
+            raise ValueError("HyperSIGMA requires a fully valid cube")
+        if not np.isfinite(model_input.signal).all():
+            raise ValueError("HyperSIGMA requires finite input")
+        layout = resolve_hsi_layout(
+            model_input.axis_names,
+            model_input.axis_units,
+            tuple(len(values) for values in model_input.axis_values),
+            expected_band_count=191,
+            expected_spatial_shape=(64, 64),
+        )
+        model_values = np.asarray(
+            layout.to_model_layout(model_input.signal), dtype=np.float64
+        )
+        prediction = self._runtime.predict(model_values)
+        if not np.isfinite(prediction).all():
+            raise ValueError("HyperSIGMA returned non-finite output")
+        restored = layout.from_model_layout(prediction)
+        return CanonicalDenoisingOutput(
+            sample_id=model_input.sample_id,
+            signal=restored,
+            valid_mask=model_input.valid_mask,
+            normalization_state_digest=model_input.normalization_state_digest,
+        )
+
+
+def denoise_cubes(
+    model_inputs: Sequence[CanonicalDenoisingInput],
+    *,
+    source_root: Path,
+    weight_path: Path,
+    variant: WeightVariant,
+    device: str = "cpu",
+) -> tuple[CanonicalDenoisingOutput, ...]:
+    """Construct one runtime and denoise all cubes in caller order."""
+
+    adapter = HyperSIGMADenoiseAdapter(
+        source_root,
+        weight_path,
+        variant=variant,
+        device=device,
+    )
+    return tuple(adapter.predict(model_input) for model_input in model_inputs)
+
+
 def _stream_sha256(stream: BinaryIO) -> tuple[int, str]:
     digest = hashlib.sha256()
     size = 0
@@ -205,6 +412,82 @@ def load_verified_state_dict(
     if not isinstance(state, Mapping):
         raise TypeError("checkpoint net must be a state-dictionary mapping")
     return cast(Mapping[str, Any], state), identity
+
+
+class _TorchRuntime:
+    """Lazy PyTorch boundary for strict official-model construction and inference."""
+
+    def __init__(
+        self,
+        source_root: Path,
+        weight_path: Path,
+        *,
+        contract: WeightAssetContract,
+        device: str,
+    ) -> None:
+        verified_source = verify_source_tree(source_root)
+        try:
+            torch_module = importlib.import_module("torch")
+        except ImportError as error:
+            raise RuntimeError(
+                "PyTorch is required at runtime for HyperSIGMA; install torch, "
+                "timm, and einops in the local execution environment"
+            ) from error
+        state_dict, verified_weight = load_verified_state_dict(
+            weight_path, contract, torch_module
+        )
+        model = _build_official_model(verified_source)
+        incompatible = model.load_state_dict(state_dict, strict=True)
+        missing_keys = tuple(getattr(incompatible, "missing_keys", ()))
+        unexpected_keys = tuple(getattr(incompatible, "unexpected_keys", ()))
+        if missing_keys or unexpected_keys:
+            raise ValueError(
+                "strict HyperSIGMA state load reported incompatible keys"
+            )
+        model.requires_grad_(False)
+        model.eval()
+        if getattr(model, "training", True):
+            raise RuntimeError("HyperSIGMA model did not enter evaluation mode")
+        self._torch = torch_module
+        self._device = self._resolve_device(device)
+        self._model = model.to(self._device)
+        self._runtime_identity = HyperSIGMARuntimeIdentity(
+            source_commit=verified_source.commit,
+            source_sha256=verified_source.file_sha256,
+            weight=verified_weight,
+            device=str(self._device),
+        )
+
+    def _resolve_device(self, requested: str) -> Any:
+        if requested == "auto":
+            name = "cuda:0" if self._torch.cuda.is_available() else "cpu"
+        elif requested == "cuda":
+            name = "cuda:0"
+        else:
+            name = requested
+        if name != "cpu" and not name.startswith("cuda:"):
+            raise ValueError("HyperSIGMA device must be auto, cpu, cuda, or cuda:N")
+        device = self._torch.device(name)
+        if device.type == "cuda" and not self._torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested but is unavailable")
+        return device
+
+    @property
+    def runtime_identity(self) -> HyperSIGMARuntimeIdentity:
+        return self._runtime_identity
+
+    def predict(self, values: NDArray[np.float64]) -> NDArray[np.float64]:
+        if values.shape != (191, 64, 64) or not np.isfinite(values).all():
+            raise ValueError("HyperSIGMA runtime requires finite (191, 64, 64) values")
+        tensor = self._torch.from_numpy(
+            np.ascontiguousarray(values, dtype=np.float32)
+        ).unsqueeze(0).to(self._device)
+        with self._torch.inference_mode():
+            predicted = self._model(tensor)
+        array = predicted.detach().cpu().numpy()
+        if array.shape != (1, 191, 64, 64) or not np.isfinite(array).all():
+            raise ValueError("HyperSIGMA returned an invalid output cube")
+        return np.asarray(array[0], dtype=np.float64)
 
 
 def _verify_weight_path(
