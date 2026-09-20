@@ -149,36 +149,35 @@ def _check_paired_pool(pool: Mapping[str, NDArray[Any]], name: str) -> int:
 
 
 def _select_validation_pool(
-    pools: Sequence[Mapping[str, Any]], opts: Mapping[str, str]
+    names: Sequence[str], opts: Mapping[str, str]
 ) -> str | None:
-    """Pick the held-out pool: the ``validation_pool`` opt, else by name.
+    """Pick the diagnostic pool: the ``validation_pool`` opt, else by name.
 
-    A ``required: true`` pool is never held out by default and cannot be
-    named for hold-out: the evaluator's data-usage rule demands that every
-    required pool influences the predictions, so holding one out would make
-    the delivery invalid.
+    The diagnostic pool is scored leak-free against an index built without
+    it and then re-admitted to the final index, so any staged pool, required
+    or not, may be chosen. An empty opt skips the diagnostic. By default a
+    pool whose name contains ``validation`` is picked, provided another pool
+    exists to score it against.
     """
-    by_name = {str(pool["name"]): pool for pool in pools}
     if "validation_pool" in opts:
         chosen = opts["validation_pool"].strip()
         if not chosen:
             return None
-        pool = by_name.get(chosen)
-        if pool is None:
+        if chosen not in names:
             raise SolverError(
                 f"prepare: --opt validation_pool={chosen!r} is not a staged paired "
-                f"pool (staged pools: {', '.join(by_name)})"
+                f"pool (staged pools: {', '.join(names)})"
             )
-        if pool["required"]:
+        if len(names) == 1:
             raise SolverError(
-                f"prepare: --opt validation_pool={chosen!r} names a required pool; "
-                "the evaluator demands every required pool influences the "
-                "predictions, so it cannot be held out (pass "
-                "--opt validation_pool= to hold nothing out)"
+                f"prepare: {chosen} is the only paired pool; nothing to score it "
+                "against (pass --opt validation_pool= to skip the diagnostic)"
             )
         return chosen
-    for name, pool in by_name.items():
-        if "validation" in name and not pool["required"]:
+    if len(names) < 2:
+        return None
+    for name in names:
+        if "validation" in name:
             return name
     return None
 
@@ -277,14 +276,13 @@ def prepare(
     if not pools:
         raise SolverError("prepare: data_manifest.json lists no paired pools")
 
-    validation_pool = _select_validation_pool(pools, opts)
+    # Every staged pool joins the final index (role "index"); the diagnostic
+    # pool is additionally scored leak-free before being re-admitted.
+    validation_pool = _select_validation_pool(
+        [str(pool["name"]) for pool in pools], opts
+    )
     for pool in pools:
-        pool["role"] = "validation" if pool["name"] == validation_pool else "index"
-    if not any(pool["role"] == "index" for pool in pools):
-        raise SolverError(
-            "prepare: every paired pool is held out for validation; nothing "
-            "is left for the index"
-        )
+        pool["diagnostic"] = pool["name"] == validation_pool
 
     result: dict[str, Any] = {
         "release_id": release_id,
@@ -343,7 +341,14 @@ def _direction_mae(
 
 
 def train(work_dir: Path, model_dir: Path, opts: Mapping[str, str]) -> dict[str, Any]:
-    """Build the neighbour index from the staged pools and score validation."""
+    """Score the diagnostic pool leak-free, then index every staged pool.
+
+    The diagnostic pool (``prepare.json["validation_pool"]``) is predicted
+    from an index built from the other pools only, so its MAE is not a
+    self-match. The final ``M/index.npz`` then re-admits it: every staged
+    pool influences the delivered predictions, as the evaluator's data-usage
+    rule demands of required pools.
+    """
     _check_opts(opts, TRAIN_OPTS, "train")
     seed_text = opts.get("seed", str(DEFAULT_SEED))
     try:
@@ -354,40 +359,54 @@ def train(work_dir: Path, model_dir: Path, opts: Mapping[str, str]) -> dict[str,
         ) from error
     prepared = _load_json_object(work_dir / "prepare.json", command="train")
     pools = _prepared_pools(prepared, command="train")
-    index_pools = [pool for pool in pools if pool.get("role") == "index"]
-    validation_pools = [pool for pool in pools if pool.get("role") == "validation"]
-    if not index_pools:
-        raise SolverError("train: prepare.json names no index pools")
+    if not pools:
+        raise SolverError("train: prepare.json names no paired pools")
+    names = [str(pool["name"]) for pool in pools]
+    staged = {
+        name: _staged_pool(work_dir, pool, command="train")
+        for name, pool in zip(names, pools, strict=True)
+    }
+
+    validation: dict[str, Any] | None = None
+    diagnostic_name = prepared.get("validation_pool")
+    if diagnostic_name is not None:
+        diagnostic_name = str(diagnostic_name)
+        if diagnostic_name not in staged:
+            raise SolverError(
+                f"train: diagnostic pool {diagnostic_name} is not staged; rerun prepare"
+            )
+        train_only = [staged[name] for name in names if name != diagnostic_name]
+        if not train_only:
+            raise SolverError(
+                f"train: {diagnostic_name} is the only paired pool; nothing to "
+                "score it against"
+            )
+        held_out = staged[diagnostic_name]
+        try:
+            diagnostic_index = PairIndex.from_pools(train_only)
+            validation = {
+                "name": diagnostic_name,
+                "records": len(held_out["sample_id"]),
+                "mae_sim2exp": _direction_mae(diagnostic_index, held_out, "sim2exp"),
+                "mae_exp2sim": _direction_mae(diagnostic_index, held_out, "exp2sim"),
+                "diagnostic": True,
+            }
+        except ValueError as error:
+            raise SolverError(
+                f"train: diagnostic on {diagnostic_name}: {error}"
+            ) from error
 
     try:
-        index = PairIndex.from_pools(
-            [_staged_pool(work_dir, pool, command="train") for pool in index_pools]
-        )
+        index = PairIndex.from_pools([staged[name] for name in names])
     except ValueError as error:
         raise SolverError(f"train: {error}") from error
     model_dir.mkdir(parents=True, exist_ok=True)
     index.save(model_dir / "index.npz")
 
-    validation: dict[str, Any] | None = None
-    if validation_pools:
-        held_out = validation_pools[0]
-        pool = _staged_pool(work_dir, held_out, command="train")
-        try:
-            validation = {
-                "name": held_out["name"],
-                "records": len(pool["sample_id"]),
-                "mae_sim2exp": _direction_mae(index, pool, "sim2exp"),
-                "mae_exp2sim": _direction_mae(index, pool, "exp2sim"),
-            }
-        except ValueError as error:
-            raise SolverError(
-                f"train: validation on {held_out['name']}: {error}"
-            ) from error
-
     result: dict[str, Any] = {
         "seed": seed,
         "release_id": prepared.get("release_id"),
-        "pools": [pool["name"] for pool in index_pools],
+        "pools": names,
         "records": len(index),
         "validation": validation,
         "created_at": _now(),
@@ -424,10 +443,15 @@ def _report(
         "the solver's own prediction, so they are a genuine round trip rather "
         "than the query echoed back."
     )
-    table = ["| pool | records | role |", "| --- | ---: | --- |"]
+    table = [
+        "| pool | records | required | diagnostic | final index |",
+        "| --- | ---: | --- | --- | --- |",
+    ]
     for pool in prepared.get("pools") or []:
         table.append(
-            f"| {pool.get('name')} | {pool.get('records')} | {pool.get('role')} |"
+            f"| {pool.get('name')} | {pool.get('records')} | "
+            f"{'yes' if pool.get('required') else 'no'} | "
+            f"{'yes' if pool.get('diagnostic') else 'no'} | yes |"
         )
     unused = (
         "Single-domain public pools (simulation-only or experiment-only) are "
@@ -435,14 +459,22 @@ def _report(
     )
     validation = trained.get("validation")
     if isinstance(validation, dict):
+        others = [
+            name for name in trained.get("pools") or [] if name != validation["name"]
+        ]
         validation_text = (
-            f"Held-out pool `{validation.get('name')}` ({validation.get('records')} "
-            f"pairs), predicted from the index alone: MAE sim2exp = "
+            f"Diagnostic pool `{validation.get('name')}` ({validation.get('records')} "
+            "pairs) was scored leak-free from a train-only index built without it "
+            f"(pools: {', '.join(others)}): MAE sim2exp = "
             f"{validation.get('mae_sim2exp'):.6f}, MAE exp2sim = "
-            f"{validation.get('mae_exp2sim'):.6f}."
+            f"{validation.get('mae_exp2sim'):.6f}. It was then re-admitted to the "
+            "final index, so every paired pool influences the delivered "
+            "predictions."
         )
     else:
-        validation_text = "No pool was held out; every paired pool is in the index."
+        validation_text = (
+            "No diagnostic pool was scored; every paired pool is in the final index."
+        )
     limitations = [
         (
             "- Nearest-neighbour oracle: nothing is learned, so predictions cannot "
@@ -532,11 +564,9 @@ def predict(
     pools = _prepared_pools(prepared, command="predict")
     usage: dict[str, Usage] = {}
     for pool in pools:
+        # Every staged pool is in the final index, the diagnostic one included.
         records = int(pool["records"])
-        if pool.get("role") == "validation":
-            usage[str(pool["name"])] = Usage(records, 0, "validation")
-        else:
-            usage[str(pool["name"])] = Usage(records, records, "index")
+        usage[str(pool["name"])] = Usage(records, records, "index")
     log: list[dict[str, Any]] = [
         {
             "step": "prepare",

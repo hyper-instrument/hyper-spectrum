@@ -184,7 +184,11 @@ class PairIndex:
         )
 
     def save(self, path: Path) -> None:
-        """Persist the index as a pickle-free ``.npz``."""
+        """Persist the index as an ``.npz`` holding exactly ``INDEX_POOL_KEYS``.
+
+        No ``allow_pickle`` kwarg: numpy < 2.4 would store it as a member of
+        that name. Nothing here needs pickling, and :meth:`load` refuses it.
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
         np.savez(
             path,
@@ -193,13 +197,17 @@ class PairIndex:
             experiment=self.experiment,
             absorber_atomic_number=self.atomic_number,
             edge_code=self.edge_code,
-            allow_pickle=False,
         )
 
     @classmethod
     def load(cls, path: Path) -> PairIndex:
         """Load an index written by :meth:`save`, re-validating it."""
         with np.load(path, allow_pickle=False) as archive:
+            unexpected = sorted(set(archive.files) - set(INDEX_POOL_KEYS))
+            if unexpected:
+                raise ValueError(
+                    f"{path} has unexpected members: {', '.join(unexpected)}"
+                )
             pool = {key: archive[key] for key in archive.files}
         return cls.from_pools([pool])
 

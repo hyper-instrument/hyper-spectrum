@@ -13,8 +13,14 @@ import pytest
 
 import hyperspectrum
 from hyperspectrum.fewshot.delivery import DELIVERY_FILES
-from hyperspectrum.fewshot.knn import GRID_POINTS, PairIndex
-from hyperspectrum.fewshot.solver import SolverError, predict, prepare, train
+from hyperspectrum.fewshot.knn import GRID_POINTS, PairIndex, predict_many
+from hyperspectrum.fewshot.solver import (
+    SolverError,
+    _select_validation_pool,
+    predict,
+    prepare,
+    train,
+)
 
 ENERGY = np.linspace(-3.0, 30.0, GRID_POINTS, dtype=np.float32)
 QUERY_IDS = [
@@ -63,7 +69,7 @@ def build_release(
     root: Path,
     *,
     grid_points: int = GRID_POINTS,
-    validation_required: bool = False,
+    validation_required: bool = True,
     extra_paired: bool = False,
 ) -> Path:
     release = root / "release"
@@ -157,14 +163,24 @@ def test_pipeline_delivers_seven_files_with_query_ids_in_order(
     # The cycle is a genuine reverse mapping, not the query echoed back.
     assert not np.array_equal(cycle, queries["spectrum"])
     assert not np.array_equal(cycle, predictions)
+    # Positively: the reverse direction applied to our own predictions ...
+    index = PairIndex.load(model / "index.npz")
+    reversed_direction = np.asarray(["exp2sim", "sim2exp", "exp2sim", "sim2exp"])
+    on_predictions = dict(queries, direction=reversed_direction, spectrum=predictions)
+    np.testing.assert_array_equal(cycle, predict_many(on_predictions, index))
+    # ... and not the reverse direction applied to the query spectra.
+    on_queries = dict(queries, direction=reversed_direction)
+    assert not np.array_equal(cycle, predict_many(on_queries, index))
 
 
-def test_data_usage_lists_index_pool_as_influencing_and_validation_as_not(
+def test_data_usage_lists_every_paired_pool_as_influencing(
     release: Path, tmp_path: Path
 ) -> None:
     _, _, out, _ = run_all(release, tmp_path)
     manifest = json.loads((release / "data_manifest.json").read_text())
 
+    # Both pools are required in the release, and both end up in the final
+    # index, so the evaluator's "required => influencing > 0" rule holds.
     usage = json.loads((out / "data_usage.json").read_text())["files"]
     assert usage["train.npz"] == {
         "scanned": 6,
@@ -174,8 +190,8 @@ def test_data_usage_lists_index_pool_as_influencing_and_validation_as_not(
     }
     assert usage["validation.npz"] == {
         "scanned": 2,
-        "influencing": 0,
-        "stage": "validation",
+        "influencing": 2,
+        "stage": "index",
         "sha256": manifest["files"]["validation.npz"]["sha256"],
     }
     assert "theory_only_public_pool.npz" not in usage
@@ -193,9 +209,33 @@ def test_data_usage_lists_index_pool_as_influencing_and_validation_as_not(
     assert run_manifest["seed"] == "42"
     report = (out / "method_report.md").read_text()
     assert "validation.npz" in report and "train.npz" in report
+    assert "leak-free" in report and "re-admitted" in report
 
 
-def test_train_excludes_validation_pool_and_reports_its_mae(
+def load_pool(path: Path) -> dict[str, Any]:
+    with np.load(path, allow_pickle=False) as archive:
+        return {key: archive[key] for key in archive.files}
+
+
+def mean_absolute_error(
+    index: PairIndex, pool: dict[str, Any], direction: str
+) -> float:
+    source, target = (
+        ("simulation", "experiment")
+        if direction == "sim2exp"
+        else ("experiment", "simulation")
+    )
+    queries = {
+        "direction": np.full(len(pool["sample_id"]), direction),
+        "spectrum": pool[source],
+        "absorber_atomic_number": pool["absorber_atomic_number"],
+        "edge_code": pool["edge_code"],
+    }
+    predicted = predict_many(queries, index).astype(np.float64)
+    return float(np.mean(np.abs(predicted - pool[target].astype(np.float64))))
+
+
+def test_train_scores_validation_leak_free_then_readmits_it(
     release: Path, tmp_path: Path
 ) -> None:
     work, model, _, _ = run_all(release, tmp_path)
@@ -204,14 +244,13 @@ def test_train_excludes_validation_pool_and_reports_its_mae(
     assert prepared["release_id"] == "f" * 32
     assert prepared["grid"]["points"] == GRID_POINTS
     assert prepared["validation_pool"] == "validation.npz"
-    assert {pool["name"]: pool["role"] for pool in prepared["pools"]} == {
-        "train.npz": "index",
-        "validation.npz": "validation",
-    }
-    assert {pool["name"]: pool["required"] for pool in prepared["pools"]} == {
-        "train.npz": True,
-        "validation.npz": False,
-    }
+    assert [
+        (pool["name"], pool["required"], pool["role"], pool["diagnostic"])
+        for pool in prepared["pools"]
+    ] == [
+        ("train.npz", True, "index", False),
+        ("validation.npz", True, "index", True),
+    ]
     # Single-domain pools and sidecars are skipped, not staged.
     assert {entry["name"] for entry in prepared["skipped"]} == {
         "theory_only_public_pool.npz",
@@ -220,15 +259,30 @@ def test_train_excludes_validation_pool_and_reports_its_mae(
 
     trained = json.loads((model / "train.json").read_text())
     assert trained["seed"] == 42
-    assert trained["pools"] == ["train.npz"]
-    assert trained["records"] == 6
+    assert trained["pools"] == ["train.npz", "validation.npz"]
+    assert trained["records"] == 8
     validation = trained["validation"]
     assert validation["name"] == "validation.npz"
-    assert validation["mae_sim2exp"] >= 0.0 and validation["mae_exp2sim"] >= 0.0
+    assert validation["records"] == 2
+    assert validation["diagnostic"] is True
 
-    index = PairIndex.load(model / "index.npz")
-    assert len(index) == 6
-    assert all(sample_id.startswith("train_") for sample_id in index.sample_id)
+    # The diagnostic MAE comes from an index WITHOUT the pool: it equals an
+    # independent train-only computation and is not the self-match of 0.
+    train_only = PairIndex.from_pools([load_pool(release / "train.npz")])
+    held_out = load_pool(release / "validation.npz")
+    for direction in ("sim2exp", "exp2sim"):
+        expected = mean_absolute_error(train_only, held_out, direction)
+        assert expected > 0.0
+        assert validation[f"mae_{direction}"] == pytest.approx(expected)
+
+    # The final index re-admits every required pool; through it the same
+    # pool would self-match exactly (MAE 0), which is why it is not scored so.
+    final = PairIndex.load(model / "index.npz")
+    assert len(final) == 8
+    assert sorted(final.sample_id) == sorted(
+        [*train_only.sample_id, *held_out["sample_id"]]
+    )
+    assert mean_absolute_error(final, held_out, "sim2exp") == 0.0
 
 
 def test_train_seed_opt_is_recorded(release: Path, tmp_path: Path) -> None:
@@ -242,12 +296,14 @@ def test_train_seed_opt_is_recorded(release: Path, tmp_path: Path) -> None:
         train(work, tmp_path / "model-2", {"seed": "seven"})
 
 
-def test_empty_validation_pool_opt_indexes_every_paired_pool(
+def test_empty_validation_pool_opt_skips_the_diagnostic(
     release: Path, tmp_path: Path
 ) -> None:
     work, model, out, _ = run_all(release, tmp_path, {"validation_pool": ""})
 
-    assert json.loads((work / "prepare.json").read_text())["validation_pool"] is None
+    prepared = json.loads((work / "prepare.json").read_text())
+    assert prepared["validation_pool"] is None
+    assert not any(pool["diagnostic"] for pool in prepared["pools"])
     trained = json.loads((model / "train.json").read_text())
     assert trained["pools"] == ["train.npz", "validation.npz"]
     assert trained["records"] == 8
@@ -255,6 +311,7 @@ def test_empty_validation_pool_opt_indexes_every_paired_pool(
     usage = json.loads((out / "data_usage.json").read_text())["files"]
     assert usage["validation.npz"]["influencing"] == 2
     assert usage["validation.npz"]["stage"] == "index"
+    assert "No diagnostic pool" in (out / "method_report.md").read_text()
 
 
 def test_validation_pool_opt_overrides_default(tmp_path: Path) -> None:
@@ -262,32 +319,73 @@ def test_validation_pool_opt_overrides_default(tmp_path: Path) -> None:
     _, model, _, _ = run_all(release, tmp_path, {"validation_pool": "extra_pairs.npz"})
 
     trained = json.loads((model / "train.json").read_text())
-    assert trained["pools"] == ["train.npz", "validation.npz"]
-    assert trained["records"] == 8
+    assert trained["pools"] == ["train.npz", "validation.npz", "extra_pairs.npz"]
+    assert trained["records"] == 10
     assert trained["validation"]["name"] == "extra_pairs.npz"
+    assert trained["validation"]["records"] == 2
 
     with pytest.raises(SystemExit, match="nope.npz"):
         prepare(release, tmp_path / "work-2", {"validation_pool": "nope.npz"})
-    # A required pool must influence the delivery, so it cannot be held out.
-    with pytest.raises(SystemExit, match="train.npz.*required"):
-        prepare(release, tmp_path / "work-3", {"validation_pool": "train.npz"})
+
+    # A required pool may be the diagnostic pool; it is still re-admitted.
+    _, model_2, out_2, _ = run_all(
+        release, tmp_path / "second", {"validation_pool": "train.npz"}
+    )
+    trained_2 = json.loads((model_2 / "train.json").read_text())
+    assert trained_2["validation"]["name"] == "train.npz"
+    assert trained_2["validation"]["records"] == 6
+    expected = mean_absolute_error(
+        PairIndex.from_pools(
+            [
+                load_pool(release / "validation.npz"),
+                load_pool(release / "extra_pairs.npz"),
+            ]
+        ),
+        load_pool(release / "train.npz"),
+        "exp2sim",
+    )
+    assert trained_2["validation"]["mae_exp2sim"] == pytest.approx(expected)
+    assert trained_2["records"] == 10
+    usage = json.loads((out_2 / "data_usage.json").read_text())["files"]
+    assert usage["train.npz"]["influencing"] == 6
 
 
-def test_required_validation_pool_stays_in_the_index_by_default(
+def test_optional_validation_pool_is_staged_scored_and_readmitted(
     tmp_path: Path,
 ) -> None:
-    release = build_release(tmp_path, validation_required=True)
+    release = build_release(tmp_path, validation_required=False)
     work, model, out, _ = run_all(release, tmp_path)
 
-    assert json.loads((work / "prepare.json").read_text())["validation_pool"] is None
+    prepared = json.loads((work / "prepare.json").read_text())
+    assert prepared["validation_pool"] == "validation.npz"
+    assert {pool["name"]: pool["required"] for pool in prepared["pools"]} == {
+        "train.npz": True,
+        "validation.npz": False,
+    }
     trained = json.loads((model / "train.json").read_text())
     assert trained["pools"] == ["train.npz", "validation.npz"]
-    assert trained["validation"] is None
+    assert trained["validation"]["diagnostic"] is True
     usage = json.loads((out / "data_usage.json").read_text())["files"]
-    assert usage["validation.npz"]["influencing"] == 2
+    assert usage["validation.npz"] == {
+        "scanned": 2,
+        "influencing": 2,
+        "stage": "index",
+        "sha256": json.loads((release / "data_manifest.json").read_text())["files"][
+            "validation.npz"
+        ]["sha256"],
+    }
 
-    with pytest.raises(SystemExit, match="validation.npz.*required"):
-        prepare(release, tmp_path / "work-2", {"validation_pool": "validation.npz"})
+
+def test_diagnostic_pool_needs_another_pool_to_score_against() -> None:
+    assert _select_validation_pool(["train.npz", "validation.npz"], {}) == (
+        "validation.npz"
+    )
+    assert _select_validation_pool(["train.npz"], {}) is None
+    assert _select_validation_pool(["validation.npz"], {}) is None
+    with pytest.raises(SystemExit, match="only paired pool"):
+        _select_validation_pool(
+            ["validation.npz"], {"validation_pool": "validation.npz"}
+        )
 
 
 def test_tampered_pool_makes_prepare_exit_with_sha_message(

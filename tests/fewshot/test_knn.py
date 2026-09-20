@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -231,6 +232,37 @@ def test_pair_index_round_trips_through_npz(tmp_path: Path) -> None:
     assert loaded.edge_code.dtype == np.int8
     np.testing.assert_array_equal(loaded.experiment, index.experiment)
     assert len(loaded) == 3
+
+
+def test_saved_index_has_exactly_the_five_members(tmp_path: Path) -> None:
+    path = tmp_path / "index.npz"
+    three_pair_index().save(path)
+
+    # In particular no stray ``allow_pickle`` member, which numpy < 2.4 would
+    # have written had the kwarg been passed to ``np.savez``.
+    with zipfile.ZipFile(path) as archive:
+        assert sorted(archive.namelist()) == [
+            "absorber_atomic_number.npy",
+            "edge_code.npy",
+            "experiment.npy",
+            "sample_id.npy",
+            "simulation.npy",
+        ]
+
+
+def test_load_rejects_unexpected_members(tmp_path: Path) -> None:
+    path = tmp_path / "index.npz"
+    three_pair_index().save(path)
+    # Reproduce the stray member numpy < 2.4 writes for a savez(allow_pickle=...)
+    # kwarg (newer numpy consumes the kwarg, so append the member by hand).
+    with (
+        zipfile.ZipFile(path, "a") as archive,
+        archive.open("allow_pickle.npy", "w") as member,
+    ):
+        np.lib.format.write_array(member, np.asarray(False))
+
+    with pytest.raises(ValueError, match="allow_pickle"):
+        PairIndex.load(path)
 
 
 def test_from_pools_rejects_missing_keys_bad_shapes_and_non_finite() -> None:
