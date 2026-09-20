@@ -42,7 +42,12 @@ SOLVER_ID = "hyperspectrum.fewshot/knn-baseline/1"
 
 @dataclass(frozen=True)
 class Usage:
-    """How one release file was used: rows read, rows that shaped predictions."""
+    """How one release file was used.
+
+    ``scanned`` counts rows read; ``influencing`` counts rows admitted to the
+    neighbour index (the evaluator only requires it to be > 0 for required
+    pools); ``stage`` names where the file entered the pipeline.
+    """
 
     scanned: int
     influencing: int
@@ -83,9 +88,13 @@ def _prediction_block(values: Any, *, name: str, count: int) -> NDArray[np.float
 def _data_usage(
     manifest: Mapping[str, Any], usage: Mapping[str, Usage]
 ) -> dict[str, Any]:
+    # A malformed manifest is bad delivery *content*, which this module reports
+    # as ValueError by contract (see write_delivery), not a Python type misuse.
     files = manifest.get("files")
     if not isinstance(files, Mapping):
-        raise TypeError("data_manifest.json must carry a 'files' object")
+        raise ValueError(  # noqa: TRY004
+            "data_manifest.json must carry a 'files' object"
+        )
     entries: dict[str, dict[str, Any]] = {}
     for name, used in usage.items():
         if not isinstance(used, Usage):
@@ -94,7 +103,9 @@ def _data_usage(
         if entry is None:
             raise ValueError(f"data_usage lists {name}, which is not in the manifest")
         if not isinstance(entry, Mapping):
-            raise TypeError(f"manifest entry for {name} must be an object")
+            raise ValueError(  # noqa: TRY004
+                f"manifest entry for {name} must be an object"
+            )
         records = entry.get("records")
         if records is not None and used.scanned > int(records):
             raise ValueError(
@@ -121,15 +132,19 @@ def _data_usage(
     return {"files": entries}
 
 
+def _package_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
 def _run_manifest(seed: int) -> dict[str, Any]:
-    seed_text = str(seed)
-    if not seed_text:
-        raise ValueError("seed must be non-empty")
     return {
-        "seed": seed_text,
+        "seed": str(seed),
         "dependencies": [
             f"numpy=={np.__version__}",
-            f"hyperspectrum=={importlib.metadata.version('hyperspectrum')}",
+            f"hyperspectrum=={_package_version('hyperspectrum')}",
         ],
         "python": platform.python_version(),
         "solver": SOLVER_ID,

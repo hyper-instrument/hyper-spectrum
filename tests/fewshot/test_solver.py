@@ -12,11 +12,13 @@ import numpy as np
 import pytest
 
 import hyperspectrum
+import hyperspectrum.fewshot.solver as solver_module
 from hyperspectrum.fewshot.delivery import DELIVERY_FILES
 from hyperspectrum.fewshot.knn import GRID_POINTS, PairIndex, predict_many
 from hyperspectrum.fewshot.solver import (
     SolverError,
     _select_validation_pool,
+    main,
     predict,
     prepare,
     train,
@@ -69,8 +71,12 @@ def build_release(
     root: Path,
     *,
     grid_points: int = GRID_POINTS,
+    grid_step: float = 0.25,
     validation_required: bool = True,
     extra_paired: bool = False,
+    validation_energy_offset: float = 0.0,
+    queries_energy_offset: float = 0.0,
+    shared_id: bool = False,
 ) -> Path:
     release = root / "release"
     release.mkdir(parents=True)
@@ -82,6 +88,12 @@ def build_release(
     }
     if extra_paired:
         pools["extra_pairs.npz"] = paired_pool("extra", [29, 26], [1, 2], 4)
+    if validation_energy_offset:
+        pools["validation.npz"]["energy"] = ENERGY + np.float32(
+            validation_energy_offset
+        )
+    if shared_id:
+        pools["validation.npz"]["sample_id"] = np.asarray(["train_0000", "valid_0001"])
     required = {"train.npz", *(["validation.npz"] if validation_required else [])}
     for name, pool in pools.items():
         np.savez(release / name, **pool)
@@ -93,7 +105,10 @@ def build_release(
         "simulation": np.zeros((1, GRID_POINTS), dtype=np.float32),
     }
     np.savez(release / "theory_only_public_pool.npz", **theory_only)
-    np.savez(release / "queries.npz", **query_pool(3))
+    queries = query_pool(3)
+    if queries_energy_offset:
+        queries["energy"] = ENERGY + np.float32(queries_energy_offset)
+    np.savez(release / "queries.npz", **queries)
 
     (release / "README.md").write_text("# Release\n")
     files: dict[str, Any] = {}
@@ -109,7 +124,7 @@ def build_release(
         "schema": "hyperdata-fewshot-release/v1",
         "task": "xas-bidirectional-mapping",
         "release_id": "f" * 32,
-        "grid": {"points": grid_points, "start_ev": -3.0, "step_ev": 0.25},
+        "grid": {"points": grid_points, "start_ev": -3.0, "step_ev": grid_step},
         "counts": {"queries": len(QUERY_IDS)},
         "paired_queries": "disjoint",
         "query_metadata": "full",
@@ -324,7 +339,7 @@ def test_validation_pool_opt_overrides_default(tmp_path: Path) -> None:
     assert trained["validation"]["name"] == "extra_pairs.npz"
     assert trained["validation"]["records"] == 2
 
-    with pytest.raises(SystemExit, match="nope.npz"):
+    with pytest.raises(SolverError, match="nope.npz"):
         prepare(release, tmp_path / "work-2", {"validation_pool": "nope.npz"})
 
     # A required pool may be the diagnostic pool; it is still re-admitted.
@@ -382,7 +397,7 @@ def test_diagnostic_pool_needs_another_pool_to_score_against() -> None:
     )
     assert _select_validation_pool(["train.npz"], {}) is None
     assert _select_validation_pool(["validation.npz"], {}) is None
-    with pytest.raises(SystemExit, match="only paired pool"):
+    with pytest.raises(SolverError, match="only paired pool"):
         _select_validation_pool(
             ["validation.npz"], {"validation_pool": "validation.npz"}
         )
@@ -394,33 +409,140 @@ def test_tampered_pool_makes_prepare_exit_with_sha_message(
     pool = release / "train.npz"
     pool.write_bytes(pool.read_bytes() + b"\0")
 
-    with pytest.raises(SystemExit, match="sha256.*train.npz") as excinfo:
+    with pytest.raises(SolverError, match="sha256.*train.npz") as excinfo:
         prepare(release, tmp_path / "work", {})
     assert excinfo.value.exit_status == 1
-    assert "Traceback" not in str(excinfo.value)
 
 
 def test_grid_other_than_133_points_is_refused(tmp_path: Path) -> None:
     release = build_release(tmp_path, grid_points=100)
 
-    with pytest.raises(SystemExit, match="grid"):
+    with pytest.raises(SolverError, match="grid"):
         prepare(release, tmp_path / "work", {})
+
+
+def test_prepare_rejects_energy_axes_off_the_manifest_grid(tmp_path: Path) -> None:
+    shifted = build_release(tmp_path / "shifted", validation_energy_offset=0.5)
+    with pytest.raises(SolverError, match="validation.npz energy"):
+        prepare(shifted, tmp_path / "work-shifted", {})
+
+    # The pools agree with each other but not with the manifest's step.
+    wrong_step = build_release(tmp_path / "step", grid_step=0.3)
+    with pytest.raises(SolverError, match="train.npz energy.*manifest grid"):
+        prepare(wrong_step, tmp_path / "work-step", {})
+
+
+def test_predict_rejects_query_energy_off_the_release_grid(tmp_path: Path) -> None:
+    release = build_release(tmp_path, queries_energy_offset=0.25)
+    work, model = tmp_path / "work", tmp_path / "model"
+    prepare(release, work, {})
+    train(work, model, {})
+
+    with pytest.raises(SolverError, match="queries.npz energy"):
+        predict(release, work, model, tmp_path / "out", {})
+
+
+def test_prepare_rejects_sample_ids_shared_across_pools(tmp_path: Path) -> None:
+    release = build_release(tmp_path, shared_id=True)
+
+    with pytest.raises(SolverError, match="duplicate sample ids.*train_0000"):
+        prepare(release, tmp_path / "work", {})
+
+
+def test_predict_verifies_queries_sha_and_index_size(
+    release: Path, tmp_path: Path
+) -> None:
+    work, model, _, _ = run_all(release, tmp_path)
+
+    trained = json.loads((model / "train.json").read_text())
+    trained["records"] = 99
+    (model / "train.json").write_text(json.dumps(trained))
+    with pytest.raises(SolverError, match="99.*rerun train"):
+        predict(release, work, model, tmp_path / "out-2", {})
+    trained["records"] = 8
+    (model / "train.json").write_text(json.dumps(trained))
+
+    queries = release / "queries.npz"
+    queries.write_bytes(queries.read_bytes() + b"\0")
+    with pytest.raises(SolverError, match="sha256 mismatch for queries.npz"):
+        predict(release, work, model, tmp_path / "out-3", {})
+
+
+def test_malformed_prepare_json_is_reported_without_traceback(
+    release: Path, tmp_path: Path
+) -> None:
+    work, model, _, _ = run_all(release, tmp_path)
+    prepared = json.loads((work / "prepare.json").read_text())
+    del prepared["pools"][0]["records"]
+    (work / "prepare.json").write_text(json.dumps(prepared))
+
+    with pytest.raises(SolverError, match="rerun prepare"):
+        train(work, tmp_path / "model-2", {})
+    with pytest.raises(SolverError, match="rerun prepare"):
+        predict(release, work, model, tmp_path / "out-2", {})
+
+    result = module_command(
+        "predict",
+        "--release-dir",
+        str(release),
+        "--work-dir",
+        str(work),
+        "--model-dir",
+        str(model),
+        "--out-dir",
+        str(tmp_path / "out-3"),
+    )
+    assert result.returncode == 1
+    assert "rerun prepare" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert len(result.stderr.strip().splitlines()) == 1
+    assert result.stdout == ""
+
+
+def test_predict_rejects_manifest_without_files_object(
+    release: Path, tmp_path: Path
+) -> None:
+    work, model, _, _ = run_all(release, tmp_path)
+    manifest = json.loads((release / "data_manifest.json").read_text())
+    del manifest["files"]
+    (release / "data_manifest.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(SolverError, match="files"):
+        predict(release, work, model, tmp_path / "out-2", {})
+
+
+def test_main_backstop_reports_unexpected_errors_on_one_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def boom(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("boom\nsecond line")
+
+    monkeypatch.setattr(solver_module, "prepare", boom)
+
+    status = main(
+        ["prepare", "--release-dir", str(tmp_path), "--work-dir", str(tmp_path / "w")]
+    )
+
+    assert status == 1
+    captured = capsys.readouterr()
+    assert captured.err == "prepare: RuntimeError: boom second line\n"
+    assert captured.out == ""
 
 
 def test_unknown_opt_exits_2_naming_the_key(release: Path, tmp_path: Path) -> None:
     work, model = tmp_path / "work", tmp_path / "model"
 
-    with pytest.raises(SystemExit, match="bogus") as excinfo:
+    with pytest.raises(SolverError, match="bogus") as excinfo:
         prepare(release, work, {"bogus": "1"})
     assert excinfo.value.exit_status == 2
 
     prepare(release, work, {})
-    with pytest.raises(SystemExit, match="validation_pool") as excinfo:
+    with pytest.raises(SolverError, match="validation_pool") as excinfo:
         train(work, model, {"validation_pool": "train.npz"})
     assert excinfo.value.exit_status == 2
 
     train(work, model, {})
-    with pytest.raises(SystemExit, match="seed") as excinfo:
+    with pytest.raises(SolverError, match="seed") as excinfo:
         predict(release, work, model, tmp_path / "out", {"seed": "1"})
     assert excinfo.value.exit_status == 2
 
@@ -434,7 +556,7 @@ def test_predict_refuses_model_from_another_release(
     manifest["release_id"] = "e" * 32
     (other / "data_manifest.json").write_text(json.dumps(manifest))
 
-    with pytest.raises(SystemExit, match="release_id"):
+    with pytest.raises(SolverError, match="release_id"):
         predict(other, work, model, tmp_path / "out-2", {})
 
 

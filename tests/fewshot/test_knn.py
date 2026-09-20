@@ -11,6 +11,7 @@ from hyperspectrum.fewshot.knn import (
     GRID_POINTS,
     PairIndex,
     candidate_indices,
+    direction_keys,
     predict_many,
     reverse_direction,
 )
@@ -292,3 +293,61 @@ def test_reverse_direction() -> None:
     assert reverse_direction("exp2sim") == "sim2exp"
     with pytest.raises(ValueError, match="direction"):
         reverse_direction("both")
+
+
+def test_direction_keys_name_the_input_and_output_domains() -> None:
+    assert direction_keys("sim2exp") == ("simulation", "experiment")
+    assert direction_keys("exp2sim") == ("experiment", "simulation")
+    with pytest.raises(ValueError, match="direction"):
+        direction_keys("both")
+
+
+def test_save_requires_an_npz_suffix(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="npz"):
+        three_pair_index().save(tmp_path / "index.bin")
+    assert not (tmp_path / "index.bin").exists()
+    assert not (tmp_path / "index.bin.npz").exists()
+
+
+def test_excluding_drops_rows_by_sample_id() -> None:
+    index = three_pair_index()
+
+    smaller = index.excluding(np.asarray(["p-1", "not-in-index"]))
+
+    assert list(smaller.sample_id) == ["p-0", "p-2"]
+    np.testing.assert_array_equal(smaller.simulation[1], constant(3.0))
+    np.testing.assert_array_equal(smaller.experiment[1], constant(30.0))
+    assert list(smaller.atomic_number) == [29, 29]
+    assert len(index) == 3  # the original is untouched
+    with pytest.raises(ValueError, match="no pairs"):
+        index.excluding(index.sample_id)
+
+
+def test_underflowing_weights_fall_back_to_the_nearest_neighbour() -> None:
+    # A finite but astronomically distant query drives every inverse-square
+    # weight to 0; the reference would raise ZeroDivisionError here.
+    index = PairIndex.from_pools(
+        [
+            pool(
+                ["a", "b"],
+                [constant(0.0), constant(1.0)],
+                [constant(10.0), constant(20.0)],
+                [29, 29],
+                [1, 1],
+            )
+        ]
+    )
+    query = {
+        "direction": np.asarray(["sim2exp"]),
+        "spectrum": np.full((1, GRID_POINTS), 1e200, dtype=np.float64),
+        "absorber_atomic_number": np.asarray([29], dtype=np.int16),
+        "edge_code": np.asarray([1], dtype=np.int8),
+    }
+
+    # numpy flags the very overflow (1e200 ** 2 -> inf) that the fallback handles.
+    with pytest.warns(RuntimeWarning, match="overflow"):
+        prediction = predict_many(query, index)
+
+    # Both distances are 1e200 in float64, so the id tie-break picks "a".
+    np.testing.assert_array_equal(prediction[0], constant(10.0))
+    assert np.isfinite(prediction).all()

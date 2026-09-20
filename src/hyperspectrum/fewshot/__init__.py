@@ -20,6 +20,7 @@ from .knn import (
     NEIGHBOR_COUNT,
     PairIndex,
     candidate_indices,
+    direction_keys,
     predict_many,
     reverse_direction,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "PairIndex",
     "Usage",
     "candidate_indices",
+    "direction_keys",
     "predict_many",
     "reverse_direction",
     "write_delivery",

@@ -9,9 +9,10 @@ The kind-agnostic kit drives this module as a subprocess::
 
 Each step writes its JSON summary (``W/prepare.json``, ``M/train.json``,
 ``O/predict.json``) and prints it as the last stdout line. ``--opt key=value``
-may repeat; unknown keys exit 2. Expected failures exit non-zero with one
-line on stderr and never a traceback. The same three steps are exposed as
-plain functions for in-process use.
+may repeat; unknown keys exit 2. Every failure exits non-zero with one line
+on stderr and never a traceback: expected ones through :class:`SolverError`,
+anything else through the backstop in :func:`main`. The same three steps are
+exposed as plain functions for in-process use.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import shutil
 import sys
 import zipfile
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,8 +39,9 @@ from .knn import (
     GRID_POINTS,
     NEIGHBOR_COUNT,
     PAIRED_POOL_KEYS,
-    QUERY_KEYS,
+    QUERY_REQUIRED_KEYS,
     PairIndex,
+    direction_keys,
     predict_many,
     reverse_direction,
 )
@@ -72,6 +75,14 @@ class SolverError(SystemExit):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _check_opts(opts: Mapping[str, str], allowed: frozenset[str], command: str) -> None:
@@ -124,28 +135,159 @@ def _safe_name(name: str, *, command: str) -> str:
     return name
 
 
+# --- release manifest -------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Manifest:
+    """The parts of ``data_manifest.json`` the solver relies on, validated."""
+
+    release_id: str
+    files: dict[str, dict[str, Any]]
+    grid: dict[str, Any]
+    axis: NDArray[np.float64]
+    queries_sha256: str | None
+
+
+def _validate_manifest(manifest: Mapping[str, Any], *, command: str) -> _Manifest:
+    release_id = manifest.get("release_id")
+    if not isinstance(release_id, str) or not release_id:
+        raise SolverError(f"{command}: data_manifest.json lacks a release_id")
+    raw_files = manifest.get("files")
+    if not isinstance(raw_files, dict):
+        raise SolverError(f"{command}: data_manifest.json lacks a 'files' object")
+    files: dict[str, dict[str, Any]] = {}
+    for raw_name, entry in raw_files.items():
+        name = _safe_name(str(raw_name), command=command)
+        if not isinstance(entry, dict):
+            raise SolverError(f"{command}: manifest entry for {name} must be an object")
+        files[name] = entry
+    grid = manifest.get("grid")
+    if not isinstance(grid, dict) or grid.get("points") != GRID_POINTS:
+        raise SolverError(
+            f"{command}: unsupported grid {grid!r}; this solver needs "
+            f"{GRID_POINTS} points"
+        )
+    start, step = grid.get("start_ev"), grid.get("step_ev")
+    if (
+        not isinstance(start, (int, float))
+        or not isinstance(step, (int, float))
+        or isinstance(start, bool)
+        or isinstance(step, bool)
+        or step == 0
+    ):
+        raise SolverError(
+            f"{command}: grid needs numeric start_ev and non-zero step_ev, got {grid!r}"
+        )
+    axis = float(start) + float(step) * np.arange(GRID_POINTS, dtype=np.float64)
+    queries_sha256 = manifest.get("queries_sha256")
+    if queries_sha256 is not None and (
+        not isinstance(queries_sha256, str) or not queries_sha256
+    ):
+        raise SolverError(
+            f"{command}: queries_sha256 must be a non-empty string when present"
+        )
+    return _Manifest(release_id, files, dict(grid), axis, queries_sha256)
+
+
+def _check_energy(
+    energy: Any, axis: NDArray[np.float64], *, what: str, command: str
+) -> NDArray[np.float64]:
+    """Require ``energy`` to be the manifest's ``start_ev + step_ev * k`` axis."""
+    values = np.asarray(energy)
+    if values.shape != (GRID_POINTS,) or values.dtype.kind not in "fiu":
+        raise SolverError(
+            f"{command}: {what} energy must be a numeric ({GRID_POINTS},) axis, "
+            f"got shape {values.shape} and dtype {values.dtype}"
+        )
+    values = np.asarray(values, dtype=np.float64)
+    if not np.isfinite(values).all() or not np.allclose(values, axis):
+        raise SolverError(
+            f"{command}: {what} energy axis does not match the manifest grid "
+            f"({axis[0]:g} eV in {axis[1] - axis[0]:g} eV steps)"
+        )
+    return values
+
+
+# --- prepare ----------------------------------------------------------------
+
+
 def _missing_paired_keys(keys: Sequence[str]) -> list[str]:
     return [key for key in PAIRED_POOL_KEYS if key not in keys]
 
 
-def _check_paired_pool(pool: Mapping[str, NDArray[Any]], name: str) -> int:
-    """Validate the full paired-pool layout and return its record count."""
+def _skip_reason(source: Path, name: str) -> str | None:
+    """Why an optional manifest file is not staged; None when it is a paired pool."""
+    if not name.endswith(".npz"):
+        return "not an npz archive"
+    try:
+        with np.load(source, allow_pickle=False) as archive:
+            keys = list(archive.files)
+    except (OSError, ValueError, EOFError, zipfile.BadZipFile):
+        return "not an npz archive"
+    missing = _missing_paired_keys(keys)
+    if missing:
+        return f"not a paired pool (missing {', '.join(missing)})"
+    return None
+
+
+@dataclass(frozen=True)
+class _StagedPool:
+    record: dict[str, Any]
+    sample_id: NDArray[np.str_]
+    energy: NDArray[np.float64]
+
+
+def _stage_pool(
+    source: Path,
+    staged: Path,
+    name: str,
+    entry: Mapping[str, Any],
+    *,
+    axis: NDArray[np.float64],
+) -> _StagedPool:
+    """Verify one paired pool against the manifest and copy it into the work dir."""
+    expected = entry.get("sha256")
+    actual = _sha256(source)
+    if actual != expected:
+        raise SolverError(
+            f"prepare: sha256 mismatch for {name}: manifest says {expected}, "
+            f"file has {actual}"
+        )
+    pool = _load_npz(source, command="prepare")
     missing = _missing_paired_keys(list(pool))
     if missing:
         raise SolverError(
             f"prepare: {name} is not a paired pool; missing keys: {', '.join(missing)}"
         )
-    energy = np.asarray(pool["energy"])
-    if energy.shape != (GRID_POINTS,):
-        raise SolverError(
-            f"prepare: {name} energy must have shape ({GRID_POINTS},), got "
-            f"{energy.shape}"
-        )
+    energy = _check_energy(pool["energy"], axis, what=name, command="prepare")
     try:
         index = PairIndex.from_pools([pool])
     except ValueError as error:
         raise SolverError(f"prepare: {name}: {error}") from error
-    return len(index)
+    records = len(index)
+    listed = entry.get("records")
+    if listed is not None and (not _is_int(listed) or listed != records):
+        raise SolverError(
+            f"prepare: {name} holds {records} records but the manifest lists {listed!r}"
+        )
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, staged)
+    record = {
+        "name": name,
+        "records": records,
+        "sha256": actual,
+        "required": entry.get("required") is True,
+        "role": "index",
+        "diagnostic": False,
+    }
+    return _StagedPool(record, index.sample_id, energy)
+
+
+def _duplicate_ids(pools: Sequence[_StagedPool]) -> list[str]:
+    ids = np.concatenate([pool.sample_id for pool in pools])
+    unique, counts = np.unique(ids, return_counts=True)
+    return [str(value) for value in unique[counts > 1]]
 
 
 def _select_validation_pool(
@@ -182,15 +324,6 @@ def _select_validation_pool(
     return None
 
 
-def _paired_pool_keys(path: Path) -> list[str] | None:
-    """Member names of an ``.npz`` without reading its arrays, or None."""
-    try:
-        with np.load(path, allow_pickle=False) as archive:
-            return list(archive.files)
-    except (OSError, ValueError, EOFError, zipfile.BadZipFile):
-        return None
-
-
 def prepare(
     release_dir: Path, work_dir: Path, opts: Mapping[str, str]
 ) -> dict[str, Any]:
@@ -199,31 +332,20 @@ def prepare(
     Every ``required: true`` file must be a paired pool whose bytes match the
     manifest's sha256. Optional files are staged only when they are paired
     pools too (single-domain pools and sidecars are skipped and listed under
-    ``skipped``).
+    ``skipped``). Every staged pool must sit on the manifest's energy grid
+    and no sample id may appear twice across pools.
     """
     _check_opts(opts, PREPARE_OPTS, "prepare")
-    manifest = _load_json_object(release_dir / "data_manifest.json", command="prepare")
-    files = manifest.get("files")
-    if not isinstance(files, dict):
-        raise SolverError("prepare: data_manifest.json lacks a 'files' object")
-    grid = manifest.get("grid")
-    if not isinstance(grid, dict) or grid.get("points") != GRID_POINTS:
-        raise SolverError(
-            f"prepare: unsupported grid {grid!r}; this solver needs "
-            f"{GRID_POINTS} points"
-        )
-    release_id = manifest.get("release_id")
-    if not isinstance(release_id, str) or not release_id:
-        raise SolverError("prepare: data_manifest.json lacks a release_id")
+    manifest = _validate_manifest(
+        _load_json_object(release_dir / "data_manifest.json", command="prepare"),
+        command="prepare",
+    )
 
     pools_dir = work_dir / POOLS_SUBDIR
     pools_dir.mkdir(parents=True, exist_ok=True)
-    pools: list[dict[str, Any]] = []
+    staged: list[_StagedPool] = []
     skipped: list[dict[str, str]] = []
-    for raw_name, entry in files.items():
-        name = _safe_name(str(raw_name), command="prepare")
-        if not isinstance(entry, dict):
-            raise SolverError(f"prepare: manifest entry for {name} must be an object")
+    for name, entry in manifest.files.items():
         required = entry.get("required") is True
         source = release_dir / name
         if not source.is_file():
@@ -234,59 +356,35 @@ def prepare(
             skipped.append({"name": name, "reason": "file not present"})
             continue
         if not required:
-            keys = _paired_pool_keys(source) if name.endswith(".npz") else None
-            if keys is None:
-                skipped.append({"name": name, "reason": "not an npz archive"})
+            reason = _skip_reason(source, name)
+            if reason is not None:
+                skipped.append({"name": name, "reason": reason})
                 continue
-            missing = _missing_paired_keys(keys)
-            if missing:
-                skipped.append(
-                    {
-                        "name": name,
-                        "reason": f"not a paired pool (missing {', '.join(missing)})",
-                    }
-                )
-                continue
-        expected = entry.get("sha256")
-        actual = _sha256(source)
-        if actual != expected:
+        pool = _stage_pool(source, pools_dir / name, name, entry, axis=manifest.axis)
+        if staged and not np.allclose(pool.energy, staged[0].energy):
             raise SolverError(
-                f"prepare: sha256 mismatch for {name}: manifest says {expected}, "
-                f"file has {actual}"
+                f"prepare: {name} energy axis differs from {staged[0].record['name']}"
             )
-        records = _check_paired_pool(_load_npz(source, command="prepare"), name)
-        listed = entry.get("records")
-        if listed is not None and int(listed) != records:
-            raise SolverError(
-                f"prepare: {name} holds {records} records but the manifest lists "
-                f"{listed}"
-            )
-        staged = pools_dir / name
-        staged.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, staged)
-        pools.append(
-            {
-                "name": name,
-                "records": records,
-                "sha256": actual,
-                "required": required,
-                "role": "index",
-            }
-        )
-    if not pools:
+        staged.append(pool)
+    if not staged:
         raise SolverError("prepare: data_manifest.json lists no paired pools")
+    duplicates = _duplicate_ids(staged)
+    if duplicates:
+        shown = ", ".join(duplicates[:5]) + (" ..." if len(duplicates) > 5 else "")
+        raise SolverError(f"prepare: duplicate sample ids across paired pools: {shown}")
 
     # Every staged pool joins the final index (role "index"); the diagnostic
     # pool is additionally scored leak-free before being re-admitted.
+    pools = [entry.record for entry in staged]
     validation_pool = _select_validation_pool(
-        [str(pool["name"]) for pool in pools], opts
+        [record["name"] for record in pools], opts
     )
-    for pool in pools:
-        pool["diagnostic"] = pool["name"] == validation_pool
+    for record in pools:
+        record["diagnostic"] = record["name"] == validation_pool
 
     result: dict[str, Any] = {
-        "release_id": release_id,
-        "grid": dict(grid),
+        "release_id": manifest.release_id,
+        "grid": manifest.grid,
         "pools": pools,
         "validation_pool": validation_pool,
         "skipped": skipped,
@@ -294,6 +392,38 @@ def prepare(
     }
     _write_json(work_dir / "prepare.json", result)
     return result
+
+
+# --- train ------------------------------------------------------------------
+
+
+def _prepared_pools(
+    prepared: Mapping[str, Any], *, command: str
+) -> list[dict[str, Any]]:
+    """The staged-pool records of ``prepare.json``, shape-checked."""
+    pools = prepared.get("pools")
+    if not isinstance(pools, list):
+        raise SolverError(
+            f"{command}: prepare.json lacks a 'pools' list; rerun prepare"
+        )
+    checked: list[dict[str, Any]] = []
+    for position, pool in enumerate(pools):
+        well_formed = (
+            isinstance(pool, dict)
+            and isinstance(pool.get("name"), str)
+            and bool(pool.get("name"))
+            and _is_int(pool.get("records"))
+            and pool["records"] >= 0
+            and isinstance(pool.get("sha256"), str)
+            and bool(pool.get("sha256"))
+        )
+        if not well_formed:
+            raise SolverError(
+                f"{command}: prepare.json pool entry {position} is malformed "
+                "(needs name, records, sha256); rerun prepare"
+            )
+        checked.append(dict(pool))
+    return checked
 
 
 def _staged_pool(
@@ -304,30 +434,15 @@ def _staged_pool(
     if not path.is_file():
         raise SolverError(f"{command}: staged pool {name} is missing; rerun prepare")
     actual = _sha256(path)
-    if actual != pool.get("sha256"):
+    if actual != pool["sha256"]:
         raise SolverError(f"{command}: staged pool {name} changed since prepare")
     return _load_npz(path, command=command)
-
-
-def _prepared_pools(
-    prepared: Mapping[str, Any], *, command: str
-) -> list[dict[str, Any]]:
-    pools = prepared.get("pools")
-    if not isinstance(pools, list) or not all(isinstance(pool, dict) for pool in pools):
-        raise SolverError(
-            f"{command}: prepare.json lacks a 'pools' list; rerun prepare"
-        )
-    return [dict(pool) for pool in pools]
 
 
 def _direction_mae(
     index: PairIndex, pool: Mapping[str, NDArray[Any]], direction: str
 ) -> float:
-    input_key, output_key = (
-        ("simulation", "experiment")
-        if direction == "sim2exp"
-        else ("experiment", "simulation")
-    )
+    input_key, output_key = direction_keys(direction)
     count = len(pool["sample_id"])
     queries = {
         "direction": np.full(count, direction),
@@ -344,10 +459,9 @@ def train(work_dir: Path, model_dir: Path, opts: Mapping[str, str]) -> dict[str,
     """Score the diagnostic pool leak-free, then index every staged pool.
 
     The diagnostic pool (``prepare.json["validation_pool"]``) is predicted
-    from an index built from the other pools only, so its MAE is not a
-    self-match. The final ``M/index.npz`` then re-admits it: every staged
-    pool influences the delivered predictions, as the evaluator's data-usage
-    rule demands of required pools.
+    from the index with its sample ids removed, so its MAE is not a
+    self-match. The final ``M/index.npz`` keeps every staged pool's rows, as
+    the evaluator's data-usage rule demands of required pools.
     """
     _check_opts(opts, TRAIN_OPTS, "train")
     seed_text = opts.get("seed", str(DEFAULT_SEED))
@@ -366,6 +480,10 @@ def train(work_dir: Path, model_dir: Path, opts: Mapping[str, str]) -> dict[str,
         name: _staged_pool(work_dir, pool, command="train")
         for name, pool in zip(names, pools, strict=True)
     }
+    try:
+        index = PairIndex.from_pools([staged[name] for name in names])
+    except ValueError as error:
+        raise SolverError(f"train: {error}") from error
 
     validation: dict[str, Any] | None = None
     diagnostic_name = prepared.get("validation_pool")
@@ -375,15 +493,10 @@ def train(work_dir: Path, model_dir: Path, opts: Mapping[str, str]) -> dict[str,
             raise SolverError(
                 f"train: diagnostic pool {diagnostic_name} is not staged; rerun prepare"
             )
-        train_only = [staged[name] for name in names if name != diagnostic_name]
-        if not train_only:
-            raise SolverError(
-                f"train: {diagnostic_name} is the only paired pool; nothing to "
-                "score it against"
-            )
         held_out = staged[diagnostic_name]
         try:
-            diagnostic_index = PairIndex.from_pools(train_only)
+            # Drop the pool's *ids*, not merely its file, so no row scores itself.
+            diagnostic_index = index.excluding(held_out["sample_id"])
             validation = {
                 "name": diagnostic_name,
                 "records": len(held_out["sample_id"]),
@@ -396,13 +509,8 @@ def train(work_dir: Path, model_dir: Path, opts: Mapping[str, str]) -> dict[str,
                 f"train: diagnostic on {diagnostic_name}: {error}"
             ) from error
 
-    try:
-        index = PairIndex.from_pools([staged[name] for name in names])
-    except ValueError as error:
-        raise SolverError(f"train: {error}") from error
     model_dir.mkdir(parents=True, exist_ok=True)
     index.save(model_dir / "index.npz")
-
     result: dict[str, Any] = {
         "seed": seed,
         "release_id": prepared.get("release_id"),
@@ -413,6 +521,87 @@ def train(work_dir: Path, model_dir: Path, opts: Mapping[str, str]) -> dict[str,
     }
     _write_json(model_dir / "train.json", result)
     return result
+
+
+# --- predict ----------------------------------------------------------------
+
+
+def _check_trained(trained: Mapping[str, Any], *, command: str) -> None:
+    pools = trained.get("pools")
+    validation = trained.get("validation")
+    well_formed = (
+        _is_int(trained.get("seed"))
+        and _is_int(trained.get("records"))
+        and isinstance(pools, list)
+        and all(isinstance(name, str) for name in pools)
+        and (validation is None or isinstance(validation, dict))
+    )
+    if not well_formed:
+        raise SolverError(
+            f"{command}: train.json is malformed (needs integer seed and records, "
+            "a pools list and validation object or null); rerun train"
+        )
+
+
+@dataclass(frozen=True)
+class _PredictInputs:
+    prepared: dict[str, Any]
+    pools: list[dict[str, Any]]
+    trained: dict[str, Any]
+    manifest: dict[str, Any]
+    queries: dict[str, NDArray[Any]]
+    index: PairIndex
+
+
+def _load_predict_inputs(
+    release_dir: Path, work_dir: Path, model_dir: Path
+) -> _PredictInputs:
+    """Load and cross-check everything ``predict`` needs before predicting."""
+    prepared = _load_json_object(work_dir / "prepare.json", command="predict")
+    trained = _load_json_object(model_dir / "train.json", command="predict")
+    raw_manifest = _load_json_object(
+        release_dir / "data_manifest.json", command="predict"
+    )
+    manifest = _validate_manifest(raw_manifest, command="predict")
+    release_ids = {
+        "data_manifest.json": manifest.release_id,
+        "prepare.json": prepared.get("release_id"),
+        "train.json": trained.get("release_id"),
+    }
+    if len(set(release_ids.values())) != 1:
+        raise SolverError(f"predict: release_id mismatch across {release_ids}")
+    pools = _prepared_pools(prepared, command="predict")
+    _check_trained(trained, command="predict")
+
+    queries_path = release_dir / "queries.npz"
+    if not queries_path.is_file():
+        raise SolverError(f"predict: {queries_path} is missing")
+    if manifest.queries_sha256 is not None:
+        actual = _sha256(queries_path)
+        if actual != manifest.queries_sha256:
+            raise SolverError(
+                f"predict: sha256 mismatch for queries.npz: manifest says "
+                f"{manifest.queries_sha256}, file has {actual}"
+            )
+    queries = _load_npz(queries_path, command="predict")
+    missing = [key for key in QUERY_REQUIRED_KEYS if key not in queries]
+    if missing:
+        raise SolverError(f"predict: queries.npz is missing keys: {', '.join(missing)}")
+    if "energy" in queries:
+        _check_energy(
+            queries["energy"], manifest.axis, what="queries.npz", command="predict"
+        )
+
+    try:
+        index = PairIndex.load(model_dir / "index.npz")
+    except (OSError, ValueError, zipfile.BadZipFile) as error:
+        raise SolverError(f"predict: cannot load index.npz: {error}") from error
+    if len(index) != trained["records"]:
+        raise SolverError(
+            f"predict: index.npz holds {len(index)} records but train.json says "
+            f"{trained['records']}; rerun train"
+        )
+    return _PredictInputs(prepared, pools, trained, raw_manifest, queries, index)
 
 
 def _report(
@@ -444,18 +633,19 @@ def _report(
         "than the query echoed back."
     )
     table = [
-        "| pool | records | required | diagnostic | final index |",
-        "| --- | ---: | --- | --- | --- |",
+        "| pool | records | required | diagnostic | rows admitted to the index |",
+        "| --- | ---: | --- | --- | ---: |",
     ]
     for pool in prepared.get("pools") or []:
         table.append(
             f"| {pool.get('name')} | {pool.get('records')} | "
             f"{'yes' if pool.get('required') else 'no'} | "
-            f"{'yes' if pool.get('diagnostic') else 'no'} | yes |"
+            f"{'yes' if pool.get('diagnostic') else 'no'} | {pool.get('records')} |"
         )
     unused = (
         "Single-domain public pools (simulation-only or experiment-only) are "
-        "not read: the baseline needs paired records."
+        "not read: the baseline needs paired records. `data_usage.json` reports "
+        "each staged pool's rows admitted to the index as `influencing`."
     )
     validation = trained.get("validation")
     if isinstance(validation, dict):
@@ -464,12 +654,12 @@ def _report(
         ]
         validation_text = (
             f"Diagnostic pool `{validation.get('name')}` ({validation.get('records')} "
-            "pairs) was scored leak-free from a train-only index built without it "
-            f"(pools: {', '.join(others)}): MAE sim2exp = "
+            "pairs) was scored leak-free from a train-only index built without its "
+            f"sample ids (pools: {', '.join(others)}): MAE sim2exp = "
             f"{validation.get('mae_sim2exp'):.6f}, MAE exp2sim = "
             f"{validation.get('mae_exp2sim'):.6f}. It was then re-admitted to the "
-            "final index, so every paired pool influences the delivered "
-            "predictions."
+            "final index, so every paired pool's rows are admitted to the index "
+            "that answers the queries."
         )
     else:
         validation_text = (
@@ -519,25 +709,13 @@ def predict(
 ) -> dict[str, Any]:
     """Answer every query in both directions and write the seven-file delivery."""
     _check_opts(opts, PREDICT_OPTS, "predict")
-    prepared = _load_json_object(work_dir / "prepare.json", command="predict")
-    trained = _load_json_object(model_dir / "train.json", command="predict")
-    manifest = _load_json_object(release_dir / "data_manifest.json", command="predict")
-    release_ids = {
-        "data_manifest.json": manifest.get("release_id"),
-        "prepare.json": prepared.get("release_id"),
-        "train.json": trained.get("release_id"),
-    }
-    if len(set(release_ids.values())) != 1:
-        raise SolverError(f"predict: release_id mismatch across {release_ids}")
-
-    queries = _load_npz(release_dir / "queries.npz", command="predict")
-    missing = [key for key in QUERY_KEYS if key not in queries]
-    if missing:
-        raise SolverError(f"predict: queries.npz is missing keys: {', '.join(missing)}")
-    try:
-        index = PairIndex.load(model_dir / "index.npz")
-    except (OSError, ValueError, zipfile.BadZipFile) as error:
-        raise SolverError(f"predict: cannot load index.npz: {error}") from error
+    inputs = _load_predict_inputs(release_dir, work_dir, model_dir)
+    prepared, trained, queries, index = (
+        inputs.prepared,
+        inputs.trained,
+        inputs.queries,
+        inputs.index,
+    )
 
     started = _now()
     directions = np.asarray(queries["direction"]).astype(str)
@@ -561,10 +739,9 @@ def predict(
         "sim2exp": int(np.count_nonzero(directions == "sim2exp")),
         "exp2sim": int(np.count_nonzero(directions == "exp2sim")),
     }
-    pools = _prepared_pools(prepared, command="predict")
     usage: dict[str, Usage] = {}
-    for pool in pools:
-        # Every staged pool is in the final index, the diagnostic one included.
+    for pool in inputs.pools:
+        # Every staged pool's rows are in the final index, the diagnostic one too.
         records = int(pool["records"])
         usage[str(pool["name"])] = Usage(records, records, "index")
     log: list[dict[str, Any]] = [
@@ -572,7 +749,7 @@ def predict(
             "step": "prepare",
             "at": prepared.get("created_at"),
             "release_id": prepared.get("release_id"),
-            "pools": [pool["name"] for pool in pools],
+            "pools": [pool["name"] for pool in inputs.pools],
             "validation_pool": prepared.get("validation_pool"),
         },
         {
@@ -599,14 +776,14 @@ def predict(
     try:
         sizes = write_delivery(
             out_dir,
-            manifest=manifest,
+            manifest=inputs.manifest,
             usage=usage,
             sample_ids=queries["sample_id"],
             predictions=predictions,
             cycle_predictions=cycle_predictions,
             method=METHOD,
             report_markdown=_report(prepared, trained, counts),
-            seed=int(trained.get("seed", DEFAULT_SEED)),
+            seed=int(trained["seed"]),
             log=log,
         )
     except ValueError as error:
@@ -615,6 +792,9 @@ def predict(
     result: dict[str, Any] = {"samples": samples, "directions": counts, "files": sizes}
     _write_json(out_dir / "predict.json", result)
     return result
+
+
+# --- command line -----------------------------------------------------------
 
 
 def _parse_opts(raw: Sequence[str]) -> dict[str, str]:
@@ -663,7 +843,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run one step; print its JSON summary last on stdout."""
+    """Run one step; print its JSON summary last on stdout.
+
+    Failures never show a traceback: a :class:`SolverError` is printed as is
+    and any other exception as ``<command>: <ExceptionName>: <message>``,
+    both on a single stderr line with exit status 1 (2 for usage errors).
+    """
     args = _build_parser().parse_args(argv)
     command = str(args.command)
     try:
@@ -677,10 +862,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.release_dir, args.work_dir, args.model_dir, args.out_dir, opts
             )
     except SolverError as error:
-        print(str(error), file=sys.stderr)
+        print(_one_line(str(error)), file=sys.stderr)
         return error.exit_status
-    except (OSError, ValueError) as error:
-        print(f"{command}: {error}", file=sys.stderr)
+    except Exception as error:  # noqa: BLE001 -- the contract forbids tracebacks
+        print(_one_line(f"{command}: {type(error).__name__}: {error}"), file=sys.stderr)
         return 1
     print(json.dumps(result))
     return 0

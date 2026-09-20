@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import zipfile
 from pathlib import Path
@@ -237,6 +238,30 @@ def test_prediction_shape_must_match_sample_ids(tmp_path: Path) -> None:
         write(tmp_path, predictions=predictions()[:-1])
     with pytest.raises(ValueError, match="cycle_predictions"):
         write(tmp_path, cycle_predictions=predictions()[:, :-1])
+
+
+def test_malformed_manifest_is_a_value_error(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="files"):
+        write(tmp_path, manifest={"release_id": "0" * 32})
+
+    broken = manifest()
+    broken["files"]["train.npz"] = "not-an-object"
+    with pytest.raises(ValueError, match="train.npz"):
+        write(tmp_path, manifest=broken)
+
+
+def test_run_manifest_falls_back_when_package_metadata_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def missing(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr("importlib.metadata.version", missing)
+
+    write(tmp_path)
+
+    run_manifest = json.loads((tmp_path / "run_manifest.json").read_text())
+    assert "hyperspectrum==unknown" in run_manifest["dependencies"]
 
 
 def test_byte_limit_violation_names_the_file(tmp_path: Path) -> None:

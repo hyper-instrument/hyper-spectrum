@@ -42,18 +42,33 @@ INDEX_POOL_KEYS = (
     "absorber_atomic_number",
     "edge_code",
 )
-QUERY_KEYS = (
+#: Keys ``queries.npz`` must carry.
+QUERY_REQUIRED_KEYS = (
     "sample_id",
     "direction",
     "spectrum",
     "absorber_atomic_number",
     "edge_code",
 )
+#: All query keys; ``energy`` is optional but, when present, must match the
+#: release grid (the solver checks it).
+QUERY_KEYS = (*QUERY_REQUIRED_KEYS, "energy")
 
 _DIRECTION_KEYS = {
     "sim2exp": ("simulation", "experiment"),
     "exp2sim": ("experiment", "simulation"),
 }
+
+
+def direction_keys(direction: str) -> tuple[str, str]:
+    """Return the ``(input, output)`` pool keys a mapping direction reads and writes."""
+    try:
+        return _DIRECTION_KEYS[direction]
+    except KeyError:
+        raise ValueError(
+            f"unknown direction {direction!r}; expected one of "
+            f"{sorted(VALID_DIRECTIONS)}"
+        ) from None
 
 
 def reverse_direction(direction: str) -> str:
@@ -135,7 +150,12 @@ class PairIndex:
 
     @classmethod
     def from_pools(cls, pools: Sequence[Mapping[str, NDArray[Any]]]) -> PairIndex:
-        """Validate and concatenate paired pools into one sorted index."""
+        """Validate and concatenate paired pools into one sorted index.
+
+        Sample ids are not deduplicated here (the reference baseline keeps
+        every row; ``prepare`` refuses releases with duplicate ids). Use
+        :meth:`excluding` to drop rows by id, e.g. for a leak-free hold-out.
+        """
         ids: list[NDArray[np.str_]] = []
         simulations: list[NDArray[np.float32]] = []
         experiments: list[NDArray[np.float32]] = []
@@ -183,12 +203,34 @@ class PairIndex:
             edge_code=np.concatenate(edge_codes)[order],
         )
 
+    def excluding(self, sample_ids: NDArray[Any]) -> PairIndex:
+        """Return the index without the rows whose ``sample_id`` is listed.
+
+        Ids that are not in the index are ignored; row order is preserved.
+        Raises ``ValueError`` when nothing would be left.
+        """
+        dropped = set(np.asarray(sample_ids).astype(str).tolist())
+        keep = np.asarray([value not in dropped for value in self.sample_id.tolist()])
+        if not keep.any():
+            raise ValueError("excluding every sample id leaves no pairs to index")
+        return PairIndex(
+            sample_id=self.sample_id[keep],
+            simulation=self.simulation[keep],
+            experiment=self.experiment[keep],
+            atomic_number=self.atomic_number[keep],
+            edge_code=self.edge_code[keep],
+        )
+
     def save(self, path: Path) -> None:
         """Persist the index as an ``.npz`` holding exactly ``INDEX_POOL_KEYS``.
 
-        No ``allow_pickle`` kwarg: numpy < 2.4 would store it as a member of
-        that name. Nothing here needs pickling, and :meth:`load` refuses it.
+        ``path`` must end in ``.npz`` (``np.savez`` would otherwise append the
+        suffix and write somewhere else). No ``allow_pickle`` kwarg: numpy <
+        2.4 would store it as a member of that name. Nothing here needs
+        pickling, and :meth:`load` refuses it.
         """
+        if path.suffix != ".npz":
+            raise ValueError(f"index path must end in .npz, got {path.name!r}")
         path.parent.mkdir(parents=True, exist_ok=True)
         np.savez(
             path,
@@ -263,7 +305,7 @@ def predict_many(
             int(atomic_numbers[position]),
             int(edge_codes[position]),
         )
-        input_key, output_key = _DIRECTION_KEYS[direction_value]
+        input_key, output_key = direction_keys(direction_value)
         query_spectrum = np.asarray(spectra[position], dtype=np.float64)
         candidate_spectra = np.asarray(
             getattr(index, input_key)[candidates], dtype=np.float64
@@ -277,6 +319,14 @@ def predict_many(
             selected = selected[exact[:1]]
             selected_distances = distances[selected]
         weights = 1.0 / np.maximum(selected_distances, DISTANCE_FLOOR) ** DISTANCE_POWER
+        if not np.sum(weights) > 0.0:
+            # Every selected distance is so large (> ~1e154) that its inverse
+            # square underflowed to 0, which the reference would turn into a
+            # ZeroDivisionError. Keep the nearest neighbour alone: it is the
+            # limit of inverse-square weighting as the distances diverge and
+            # mirrors the exact-match rule. Unreachable on real spectra.
+            selected = selected[:1]
+            weights = np.ones(1, dtype=np.float64)
         selected_targets = np.asarray(
             getattr(index, output_key)[candidates[selected]], dtype=np.float64
         )
