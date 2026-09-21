@@ -19,6 +19,35 @@ from hyperspectrum.registry.models import (
 
 ROOT = Path(__file__).resolve().parents[2]
 
+GAUSSIAN_ASSET: dict[str, object] = {
+    "variant": "gaussian",
+    "repository": "WHU-Sigma/HyperSIGMA",
+    "revision": "e0567395fbdfddbae994695baf5fc73358a1ec3c",
+    "digest": "dc101cfe7d462d721eb46395b1621d82103cf4e72166d8591b5619cb2d10e806",
+    "asset_id": "hf-whu-sigma-hypersigma-gaussian-e0567395",
+    "source_url": (
+        "https://huggingface.co/WHU-Sigma/HyperSIGMA/resolve/"
+        "e0567395fbdfddbae994695baf5fc73358a1ec3c/Denoising_models/"
+        "hypersigma_gaussian_noise_model.pth"
+    ),
+    "filename": "hypersigma_gaussian_noise_model.pth",
+    "size_bytes": 2266408098,
+    "license": "Apache-2.0",
+}
+
+COMPLEX_ASSET: dict[str, object] = {
+    **GAUSSIAN_ASSET,
+    "variant": "complex",
+    "digest": "8b1162aae6811af67d287b9271e74154db5448c5e2fd6df953dae5d7807bbe7e",
+    "asset_id": "hf-whu-sigma-hypersigma-complex-e0567395",
+    "source_url": (
+        "https://huggingface.co/WHU-Sigma/HyperSIGMA/resolve/"
+        "e0567395fbdfddbae994695baf5fc73358a1ec3c/Denoising_models/"
+        "hypersigma_complex_noise_model.pth"
+    ),
+    "filename": "hypersigma_complex_noise_model.pth",
+}
+
 
 def manifest() -> dict[str, object]:
     """A hand-authored, valid external tool declaration for loader boundary tests."""
@@ -82,6 +111,124 @@ def test_loads_exact_licensed_xasdenoise_source_and_weight_asset() -> None:
         "09620ee9ea0c96585f534d76ce42aa72edf2cf71e481f5737e43e93116e24160"
     )
     assert tool.weights.license == "CC-BY-4.0"
+    assert tool.weights.allow_download is False
+
+
+def test_schema_and_model_accept_two_immutable_weight_variants() -> None:
+    # Break caught: a multi-checkpoint tool could be forced into one ambiguous asset.
+    data = manifest()
+    data["weights"] = {
+        "required": True,
+        "state": "present",
+        "allow_download": False,
+        "assets": [GAUSSIAN_ASSET, COMPLEX_ASSET],
+    }
+    schema = json.loads(
+        (ROOT / "schemas/hyperspectrum-tool-v1.schema.json").read_text()
+    )
+
+    tool = ToolManifest.model_validate(data)
+
+    assert tuple(asset.variant for asset in tool.weights.assets) == (
+        "gaussian",
+        "complex",
+    )
+    assert Draft202012Validator(schema).is_valid(data)
+
+
+@pytest.mark.parametrize("field", ["variant", "digest", "asset_id"])
+def test_multi_weights_reject_semantically_duplicate_assets(field: str) -> None:
+    # Break caught: callers could not unambiguously select or audit a variant.
+    duplicate = deepcopy(COMPLEX_ASSET)
+    duplicate[field] = GAUSSIAN_ASSET[field]
+    data = manifest()
+    data["weights"] = {
+        "required": True,
+        "state": "present",
+        "allow_download": False,
+        "assets": [GAUSSIAN_ASSET, duplicate],
+    }
+
+    with pytest.raises(ValidationError, match=f"unique {field}"):
+        ToolManifest.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    [
+        ("repository", "mutable-name", "owner/name"),
+        ("revision", "main", "40-character"),
+        ("digest", "bad", "64-character"),
+        ("source_url", "http://example.invalid/model.pth", "HTTPS"),
+        ("filename", "../model.pth", "basename"),
+        ("size_bytes", 0, "greater than 0"),
+        ("license", " ", "non-blank"),
+    ],
+)
+def test_multi_weights_reject_mutable_or_incomplete_asset_identity(
+    field: str, replacement: object, message: str
+) -> None:
+    # Break caught: one weak asset could invalidate the complete variant set.
+    invalid = deepcopy(GAUSSIAN_ASSET)
+    invalid[field] = replacement
+    data = manifest()
+    data["weights"] = {
+        "required": True,
+        "state": "present",
+        "allow_download": False,
+        "assets": [invalid, COMPLEX_ASSET],
+    }
+
+    with pytest.raises(ValidationError, match=message):
+        ToolManifest.model_validate(data)
+
+
+def test_present_weights_reject_mixed_legacy_and_multi_asset_forms() -> None:
+    # Break caught: two competing declarations could disagree about checkpoint identity.
+    data = manifest()
+    data["weights"] = {
+        "required": True,
+        "state": "present",
+        "allow_download": False,
+        "digest": "a" * 64,
+        "asset_id": "legacy",
+        "source_url": "https://example.invalid/legacy.pth",
+        "filename": "legacy.pth",
+        "size_bytes": 42,
+        "license": "Apache-2.0",
+        "assets": [GAUSSIAN_ASSET, COMPLEX_ASSET],
+    }
+
+    with pytest.raises(ValidationError, match="cannot mix legacy fields and assets"):
+        ToolManifest.model_validate(data)
+
+
+def test_non_present_weights_reject_multi_asset_metadata() -> None:
+    # Break caught: unavailable weights could still advertise selectable asset variants.
+    data = manifest()
+    data["weights"] = {
+        "required": True,
+        "state": "required-missing",
+        "allow_download": False,
+        "assets": [GAUSSIAN_ASSET],
+    }
+
+    with pytest.raises(ValidationError, match="only present weights"):
+        ToolManifest.model_validate(data)
+
+
+def test_loads_exact_hypersigma_source_and_both_weight_assets() -> None:
+    # Break caught: the published tool could drift from the audited source or assets.
+    tool = load_tool_manifest(ROOT / "tools/hsi/hypersigma-denoise/tool.yaml")
+
+    assert tool.source.commit == "07e9ea24e3072fcb5c3a92a2bcb8185e43b295b9"
+    assert tool.license == "Apache-2.0"
+    assert tool.distribution == "open-distribution"
+    assert tool.entrypoint == "hyperspectrum.adapters.hypersigma:denoise_cubes"
+    assert tuple(asset.model_dump(mode="json") for asset in tool.weights.assets) == (
+        GAUSSIAN_ASSET,
+        COMPLEX_ASSET,
+    )
     assert tool.weights.allow_download is False
 
 

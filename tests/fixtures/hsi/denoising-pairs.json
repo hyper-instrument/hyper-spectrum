@@ -1,0 +1,16 @@
+{
+  "schema_version": "hyperspectrum-hsi-synthetic-fixture/v1",
+  "fixture_kind": "synthetic",
+  "sample_id": "synthetic-hsi-pair-001",
+  "group_id": "synthetic-scene-001",
+  "axis_names": ["band", "y", "x"],
+  "axis_units": ["index", "pixel", "pixel"],
+  "noisy": [
+    [[0.0, 0.2], [0.4, 0.6]],
+    [[0.1, 0.3], [0.5, 0.7]]
+  ],
+  "clean": [
+    [[0.0, 0.1], [0.4, 0.5]],
+    [[0.1, 0.2], [0.5, 0.6]]
+  ]
+}

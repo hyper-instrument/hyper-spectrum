@@ -163,6 +163,66 @@ class SourceSpec(BaseModel):
         return self
 
 
+class WeightAssetSpec(BaseModel):
+    """One immutable named checkpoint in a multi-weight tool contract."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    variant: str
+    repository: str
+    revision: str
+    digest: str
+    asset_id: str
+    source_url: str
+    filename: str
+    size_bytes: int = Field(gt=0)
+    license: str
+
+    @field_validator(
+        "variant", "repository", "asset_id", "source_url", "filename", "license"
+    )
+    @classmethod
+    def require_nonblank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("weight asset text must be non-blank")
+        return value
+
+    @field_validator("repository")
+    @classmethod
+    def require_repository_id(cls, value: str) -> str:
+        parts = value.split("/")
+        if len(parts) != 2 or any(not part.strip() for part in parts):
+            raise ValueError("weight repository must be owner/name")
+        return value
+
+    @field_validator("revision")
+    @classmethod
+    def require_revision(cls, value: str) -> str:
+        if _GIT_COMMIT.fullmatch(value) is None:
+            raise ValueError(
+                "weight revision must be a 40-character lowercase commit"
+            )
+        return value
+
+    @field_validator("digest")
+    @classmethod
+    def require_digest(cls, value: str) -> str:
+        if _SHA256_DIGEST.fullmatch(value) is None:
+            raise ValueError(
+                "weight digest must be a 64-character lowercase SHA-256"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def require_safe_location(self) -> WeightAssetSpec:
+        parsed = urlparse(self.source_url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("weight source_url must be an absolute HTTPS URL")
+        if PurePath(self.filename).name != self.filename:
+            raise ValueError("weight filename must be a basename")
+        return self
+
+
 class WeightsSpec(BaseModel):
     """A declared weight state; tools can never download weights automatically."""
 
@@ -177,6 +237,7 @@ class WeightsSpec(BaseModel):
     filename: str | None = None
     size_bytes: int | None = Field(default=None, gt=0)
     license: str | None = None
+    assets: tuple[WeightAssetSpec, ...] | None = Field(default=None, min_length=1)
 
     @field_validator("digest")
     @classmethod
@@ -198,23 +259,35 @@ class WeightsSpec(BaseModel):
             raise ValueError("required weights cannot have state not-required")
         if not self.required and self.state != "not-required":
             raise ValueError("optional weights must have state not-required")
-        if self.state == "present" and self.digest is None:
-            raise ValueError("present weights require a weight digest")
-        if self.state != "present" and self.digest is not None:
-            raise ValueError("only present weights may declare a weight digest")
         asset_values = (
+            self.digest,
             self.asset_id,
             self.source_url,
             self.filename,
             self.size_bytes,
             self.license,
         )
-        if self.state == "present" and any(value is None for value in asset_values):
-            raise ValueError(
-                "present weights require complete declarative asset metadata"
-            )
-        if self.state != "present" and any(value is not None for value in asset_values):
+        legacy_any = any(value is not None for value in asset_values)
+        legacy_complete = all(value is not None for value in asset_values)
+        if self.state == "present":
+            if self.assets is not None and legacy_any:
+                raise ValueError(
+                    "present weights cannot mix legacy fields and assets"
+                )
+            if self.assets is None and self.digest is None:
+                raise ValueError("present weights require a weight digest or assets")
+            if self.assets is None and not legacy_complete:
+                raise ValueError(
+                    "present weights require complete declarative asset metadata"
+                )
+        elif legacy_any or self.assets is not None:
             raise ValueError("only present weights may declare asset metadata")
+        for field_name in ("variant", "digest", "asset_id"):
+            values = tuple(
+                getattr(asset, field_name) for asset in self.assets or ()
+            )
+            if len(values) != len(set(values)):
+                raise ValueError(f"weight assets require unique {field_name}")
         if self.source_url is not None:
             parsed = urlparse(self.source_url)
             if parsed.scheme != "https" or not parsed.netloc:

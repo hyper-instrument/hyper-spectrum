@@ -69,6 +69,21 @@
         {"type": "object", "additionalProperties": false, "required": ["kind", "package", "version", "revision"], "properties": {"kind": {"const": "local-package"}, "repository": {"type": "null"}, "commit": {"type": "null"}, "release": {"type": "null"}, "package": {"type": "string", "minLength": 1}, "version": {"type": "string", "pattern": "^v?\\d+(?:\\.\\d+)+(?:[-.]?(?:a|alpha|b|beta|rc|pre|preview|post|dev)\\d*(?:\\.\\d+)*)?(?:\\+[0-9A-Za-z.-]+)?$"}, "revision": {"anyOf": [{"type": "string", "pattern": "^[0-9a-f]{40}$"}, {"type": "string", "pattern": "^v?\\d+(?:\\.\\d+)+(?:[-.]?(?:a|alpha|b|beta|rc|pre|preview|post|dev)\\d*(?:\\.\\d+)*)?(?:\\+[0-9A-Za-z.-]+)?$"}]}}}
       ]
     },
+    "weightAsset": {
+      "type": "object", "additionalProperties": false,
+      "required": ["variant", "repository", "revision", "digest", "asset_id", "source_url", "filename", "size_bytes", "license"],
+      "properties": {
+        "variant": {"type": "string", "minLength": 1},
+        "repository": {"type": "string", "pattern": "^[^/]+/[^/]+$"},
+        "revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "asset_id": {"type": "string", "minLength": 1},
+        "source_url": {"type": "string", "pattern": "^https://[^/]+/.+"},
+        "filename": {"type": "string", "minLength": 1, "pattern": "^[^/\\\\]+$"},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "license": {"type": "string", "minLength": 1}
+      }
+    },
     "weights": {
       "type": "object", "additionalProperties": false, "required": ["required", "state", "allow_download"],
       "properties": {
@@ -80,13 +95,17 @@
         "source_url": {"type": "string", "pattern": "^https://[^/]+/.+"},
         "filename": {"type": "string", "minLength": 1, "pattern": "^[^/\\\\]+$"},
         "size_bytes": {"type": "integer", "minimum": 1},
-        "license": {"type": "string", "minLength": 1}
+        "license": {"type": "string", "minLength": 1},
+        "assets": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/weightAsset"}}
       },
       "allOf": [
         {"if": {"properties": {"required": {"const": true}}}, "then": {"properties": {"state": {"enum": ["present", "required-missing"]}}}},
         {"if": {"properties": {"required": {"const": false}}}, "then": {"properties": {"state": {"const": "not-required"}}}},
-        {"if": {"properties": {"state": {"const": "present"}}}, "then": {"required": ["digest", "asset_id", "source_url", "filename", "size_bytes", "license"]}},
-        {"if": {"properties": {"state": {"enum": ["not-required", "required-missing"]}}}, "then": {"not": {"anyOf": [{"required": ["digest"]}, {"required": ["asset_id"]}, {"required": ["source_url"]}, {"required": ["filename"]}, {"required": ["size_bytes"]}, {"required": ["license"]}]}}}
+        {"if": {"properties": {"state": {"const": "present"}}}, "then": {"oneOf": [
+          {"required": ["digest", "asset_id", "source_url", "filename", "size_bytes", "license"], "not": {"required": ["assets"]}},
+          {"required": ["assets"], "not": {"anyOf": [{"required": ["digest"]}, {"required": ["asset_id"]}, {"required": ["source_url"]}, {"required": ["filename"]}, {"required": ["size_bytes"]}, {"required": ["license"]}]}}
+        ]}},
+        {"if": {"properties": {"state": {"enum": ["not-required", "required-missing"]}}}, "then": {"not": {"anyOf": [{"required": ["digest"]}, {"required": ["asset_id"]}, {"required": ["source_url"]}, {"required": ["filename"]}, {"required": ["size_bytes"]}, {"required": ["license"]}, {"required": ["assets"]}]}}}
       ]
     }
   }
